@@ -1,228 +1,162 @@
-# Nexus — Implementation Plan (Draft v0.1)
+# Nexus — Implementation Plan (Draft v0.2)
 
 ## Strategy
 
-Build vertically, not horizontally. Every phase ends with something **runnable end-to-end** — even if it covers only a sliver of the eventual feature set. This is the opposite of "first build all the DB, then all the LLM, then all the UI." That path always ships nothing for months.
+Build vertically, not horizontally. Every phase ends with something **runnable end-to-end** — even if it covers only a sliver of the eventual feature set. Phase 0 + Phase 1 are done; v1 is five phases away from being a usable Telegram bot.
 
 Each phase has:
 - **Goal**: what new behavior the system gains
 - **Done when**: testable definition of done
 - **Cuts**: what we explicitly defer
 
-## Phase 0 — Repo bootstrap (~½ day)
-
-**Goal:** Empty project boots; you can `uv run nexus --help`.
-
-- `pyproject.toml`, `uv.lock`, `.env.example`, `.gitignore`
-- `docker-compose.yml` with postgres + pgvector
-- `nexus/config.py` reads env
-- `nexus/clients/cli.py` with one `hello` command
-- `tests/` skeleton; `pytest` runs (no real tests yet)
-- Init git repo (currently not initialized — confirm before)
-
-**Done when:** `docker compose up -d`, `uv run nexus hello` prints something, `pytest` runs with 0 tests.
-
-**Cuts:** No DB connection yet, no LLM calls.
+The plan distinguishes **v1** (phases 2–5) from **v2** (phase 6+), to keep MVP scope tight.
 
 ---
 
-## Phase 1 — DB foundation (1–2 days)
+## Phase 0 — Repo bootstrap ✓
 
-**Goal:** Fixed schema lives in code, migrates cleanly, basic CRUD works.
+Done. Repo, uv, docker-compose, CLI skeleton, smoke tests.
 
-- `nexus/db/models.py` — all tables from `docs/schema.md`
-- Alembic init + first migration
-- `pgvector` extension enabled in migration
-- `nexus/db/repository.py` — minimum useful set:
-  - `create_user`, `create_project`
-  - `add_message`, `recent_messages(project_id, limit)`
-  - `add_event`, `recent_events(project_id, since)`
-  - `upsert_entity`, `get_entity_by_name`
-- CLI: `nexus user create`, `nexus project create --domain language_learning`
-- Integration tests against compose-managed postgres
+## Phase 1 — DB foundation ✓
 
-**Done when:** Can create a user + project, write/read messages and events via CLI, alembic up/down works cleanly.
+Done. Migration 0001 created all 10 tables of the original schema (users, projects, entities, events, event_entities, messages, summaries, embeddings — plus alembic_version). Repository helpers and CLI commands for user/project CRUD. Integration tests pass.
 
-**Cuts:** No embeddings yet, no LLM, no domain validation.
+Note: the v1 path uses only a subset of those tables (users, projects, messages, summaries) plus two new tables added in migration 0002 below. The rest (`entities`, `events`, `event_entities`, `embeddings`) are reserved for v2.
 
 ---
 
-## Phase 2 — Domain config + Architect MVP (2–3 days)
+## Phase 2 — Plans + Sessions + Architect (3–5 days)
 
-**Goal:** Architect can interview a user and produce a validated `DomainConfig`.
+**Goal:** Architect interviews the user and produces a `DomainConfig` plus one or more initial `plans`. Sessions table exists; plan/session repo helpers exist. CLI can run the architect.
 
-- `nexus/domains/base.py` — pydantic `DomainConfig` schema
-- `nexus/domains/language_learning.yaml` — hand-written gold standard
-- `nexus/domains/registry.py` — load + validate YAML configs
-- `nexus/llm/client.py` + `nexus/llm/anthropic.py` — minimal chat interface
-- `nexus/architect/interview.py` — multi-turn loop:
-  - System prompt explains the schema
-  - Asks user about goals, focus tags, preferred cadence
-  - Outputs a `DomainConfig` JSON
-  - Validates against pydantic; if invalid, loops back to fix
-- `nexus/architect/config_writer.py` — writes config to `projects.config`
-- CLI: `nexus architect run --user <id>` runs interactive interview
+- Migration **0002**: add `plans` and `sessions` tables; add `session_id` column to `messages` and `summaries`; backfill not needed (no production data).
+- `nexus/db/models.py` updated; `nexus/db/repository.py` gains: `create_plan`, `get_active_plans`, `supersede_plan`, `create_session`, `end_session`, `set_session_summary`, `recent_summaries`, `list_messages_for_session`.
+- `nexus/domains/base.py` — pydantic `DomainConfig` schema (simplified per `docs/schema.md`).
+- `nexus/domains/language_learning.yaml`, `nexus/domains/fitness.yaml` — gold-standard configs.
+- `nexus/domains/registry.py` — load + validate YAML configs.
+- `nexus/llm/base.py` + `nexus/llm/anthropic.py` — provider-agnostic chat interface (no tool-use needed yet).
+- `nexus/architect/interview.py` — multi-turn interview loop. Asks about goals, schedule, level. Produces:
+  - `DomainConfig` (validated against pydantic schema)
+  - One or more `Plan`s with items (yearly + weekly + optional level_check)
+- `nexus/architect/persist.py` — writes config to `projects.config` and plan rows to `plans`.
+- CLI: `nexus architect run --user-id ... --domain language_learning` runs the interview interactively, prints plan IDs at the end.
+- Integration tests: architect produces valid configs and plans from canned transcripts.
 
-**Done when:** You can run the architect on language-learning, end up with a valid `DomainConfig` saved to `projects.config`, and the gold-standard YAML validates against the same schema.
+**Done when:** The architect, given a user and a domain, leaves the DB in a state where there is a project with a valid `config` and at least one active plan, and a session can be started against it. All written from CLI; Telegram comes in Phase 4.
 
-**Cuts:** No specialist yet. Architect doesn't need to be perfect — only "produces a valid config." Refinement comes later.
+**Cuts:** No specialist runtime yet. The architect itself is a session of `kind='architect'` for uniformity, but doesn't need to be summarized in v1 — its output (plan + config) is its summary.
 
 ---
 
-## Phase 3 — Specialist v1: episodic-only loop (2–3 days)
+## Phase 3 — Specialist v1: no-tool chat loop (3–4 days)
 
-**Goal:** End-to-end conversation works. CLI chat. Agent reads recent messages, responds, and can log entities + events via tool calls.
+**Goal:** End-to-end conversation works from CLI. Session lifecycle works. At session end, a summary is generated and a plan-item progress update applied.
 
-- `nexus/specialist/tools.py` — tool schemas (Anthropic tool-use format):
-  - `create_entity(type, name, attributes)`
-  - `update_entity_state(entity_id, state_patch)`
-  - `log_event(type, payload, entity_names?, occurred_at?)`
-- `nexus/specialist/memory.py` — Phase 3 version: just last-N messages
+- `nexus/specialist/session.py` — session lifecycle: `open_or_resume_session(project_id)`, `end_session(session_id, reason)`. Lazy open + idle-timeout close.
+- `nexus/specialist/context.py` — context assembly at session start: load active plans, last K session summaries, this session's messages. Build system prompt.
 - `nexus/specialist/agent.py` — main loop:
-  1. Load project + DomainConfig
-  2. Build system prompt from config (entity types, event types, tone)
-  3. Append recent messages (episodic)
-  4. Call LLM with tools
-  5. Execute tool calls, persist results
-  6. Persist assistant message
-- CLI: `nexus chat --project <id>` interactive loop
+  1. On user message: open or resume session, persist user message.
+  2. Build context (system prompt + chat history). Cache the system prompt; only append messages on subsequent turns.
+  3. `llm.chat(...)` — no tools.
+  4. Persist assistant message.
+- `nexus/specialist/summarizer.py` — at session end:
+  1. Load all session messages.
+  2. LLM call with summarize prompt (domain-specific via `config.summary.prompt_style`).
+  3. Output: `(content, focus_tags, plan_item_status_update?, plan_revision?)`.
+  4. Write `summaries`, update `sessions`, patch plan items, optionally supersede plan.
+- `nexus/specialist/prompts.py` — base + per-domain summarize prompts.
+- CLI: `nexus chat --project-id ...` interactive REPL. `/end` to close session and trigger summary; otherwise idle timeout fires on next start.
+- CLI: `nexus session list --project-id ...` shows recent sessions + their summary status.
 
-**Done when:** You can run a 5-minute language-learning session via CLI, end up with vocab entities and review events in the DB, and the agent recalls earlier turns.
+**Done when:** You can run a multi-turn lesson via CLI, type `/end`, and immediately see (a) a new `summaries` row, (b) sessions.status flipped to `completed`, (c) the relevant plan item marked `completed`. Cross-day: starting a new session on Day 2 loads the Day 1 summary into the context.
 
-**Cuts:** No semantic search, no summaries, no structural stats. Domain-specific behavior comes purely from the system prompt + DomainConfig.
+**Cuts:** No mid-session retrieval. No semantic search. No structured entity/event extraction. No Telegram — that's Phase 4. The agent's prompt is pure prose; no tool schemas in the system prompt.
 
 ---
 
 ## Phase 4 — Telegram client (2–3 days)
 
-**Goal:** Telegram is the primary user-facing client. Uses the same specialist loop as the CLI.
+**Goal:** Telegram is the primary user-facing client. Uses the same specialist + architect under the hood as the CLI.
 
-- Define `nexus/clients/base.py` — `ClientAdapter` protocol (send_text, on_user_message, attach_specialist). Refactor `cli.py` to implement it. **Don't design this protocol until now** — designing it before a second client exists is guessing.
+- `nexus/clients/base.py` — `ClientAdapter` protocol (only designed *now* because we have a second client to compare against; designing it earlier would be guessing).
+- Refactor `nexus/clients/cli.py` to implement `ClientAdapter`.
 - `nexus/clients/telegram.py` — bot with handlers:
   - `/start` → user lookup or creation, auth via `users.telegram_id`
   - `/projects` → list user's projects
-  - `/use <project>` → set active project for this chat
-  - `/architect` → run the architect interview in-chat
+  - `/use <project>` → set `users.settings.active_project_per_chat[chat_id]`
+  - `/architect` → run architect in-chat
+  - `/end` → end current session
   - default text → forward to `specialist.agent`
-- Multi-user routing falls out for free because everything is keyed on `(user_id, project_id)`.
+- Idle-timeout job runs on a small in-process scheduler (APScheduler or simple asyncio loop): every minute, finds sessions where `status='active' AND now() - max(messages.occurred_at) > timeout_minutes` and ends them.
 
-**Done when:** You can use Nexus end-to-end from Telegram on your phone with the language-learning project.
+**Done when:** You can run an end-to-end lesson from your phone, including the architect onboarding interview, getting a session summary back, and resuming the next day.
 
-**Cuts:** No semantic recall or structural stats yet — that lands in 5 and 6. The agent will feel a bit shallow. That's fine; the goal is "primary client works."
-
----
-
-## Phase 5 — Embeddings + semantic memory (2 days)
-
-**Goal:** Agent can recall things from much earlier than the episodic window.
-
-- `nexus/llm/embeddings.py` — embedding client (provider-agnostic)
-- `nexus/workers/embedder.py` — async worker:
-  - Watches new rows in `messages`, `summaries`, `entities`
-  - Chunks + embeds → writes to `embeddings`
-- `nexus/db/repository.py` — `semantic_search(project_id, query, k)`
-- `nexus/specialist/memory.py` — extend to fetch top-k semantic chunks
-- CLI: `nexus reindex --project <id>` for backfills
-
-**Done when:** Agent answers a question whose answer lies before the episodic window (e.g., "what was my hardest word last week?").
-
-**Cuts:** Not optimizing chunking or HNSW params yet — defaults are fine.
+**Cuts:** Single-language UI (English). No voice. No attachments.
 
 ---
 
-## Phase 6 — Structural stats + summaries (2–3 days)
+## Phase 5 — Second domain: fitness (1–2 days)
 
-**Goal:** Third memory tier. Agent has access to typed aggregations and periodic recaps.
+**Goal:** Validate the abstraction. If language-learning-shaped assumptions leaked in, fix them now — not later.
 
-- `nexus/specialist/stats.py` — registered stat handlers, e.g.:
-  - `vocab_mastery_distribution(project_id)`
-  - `daily_practice_streak(project_id)`
-  - `prs_last_30_days(project_id)`
-- `nexus/domains/handlers.py` — state-update rules referenced by `event_types[*].updates_state` in DomainConfig (e.g., `epley_estimate`, `spaced_repetition_v1`)
-- Wire stats into specialist's system prompt as a "current state" block
-- `nexus/specialist/summarizer.py` — generates daily/weekly summaries
-- `nexus/workers/scheduler.py` — triggers summarizer on cadence
+- `nexus/domains/fitness.yaml`, gold-standard plan templates the architect can use.
+- New summarize prompt: `fitness`. Captures sets/reps narratively in the summary text rather than as structured events (those are v2).
+- Run an end-to-end fitness session via CLI and Telegram.
 
-**Done when:** All three memory tiers are present in the specialist's prompt; daily summary lands in `summaries` table for an active project.
+**Done when:** A user can have one language-learning project and one fitness project under the same account; both work without any code changes outside `nexus/domains/` and `nexus/specialist/prompts.py`.
+
+**Refactor budget:** if the abstraction strains here, fix it now. Don't ship v1 with two domains that share code by coincidence rather than design.
 
 ---
 
-## Phase 6 — Second domain: fitness (1–2 days)
+## V2 — Deferred features (planned, not scoped)
 
-**Goal:** Validate the abstraction by adding a domain that's structurally different from language learning. If it breaks, refactor before going further.
+These have schema support already (tables exist from migration 0001) but no v1 code path. Sequence is approximate; reorder based on what users actually need after v1 ships.
 
-- `nexus/domains/fitness.yaml`
-- New stat handlers: `prs_last_30_days`, `weekly_volume_per_muscle_group`, `bodyweight_trend`
-- New state-update handler: `epley_estimate`
-- Run an end-to-end fitness session in CLI
+### V2.1 — Structured extraction at session end
 
-**Done when:** A user can have one language-learning project and one fitness project under the same account; both work without code changes outside `domains/`, `specialist/stats.py`, and `domains/handlers.py`.
+At session end, alongside the summary, the LLM emits structured "things that happened": new `entities` (vocab_word, exercise, ...), new `events` (vocab_review, workout_set, body_measurement), state mutations on existing entities. Writes into `entities`, `events`, `event_entities`. Per-domain extraction prompts; per-domain state-update rules (e.g., `spaced_repetition_v1`, `epley_estimate`).
 
-**Refactor budget:** if the abstraction strains here, fix it now — don't paper over it.
+### V2.2 — Embedding pipeline
 
----
+Embed messages and summaries on insert. Backfill via `nexus reindex`. Adds value to V2.3.
 
-## Phase 7 — MCP bridge (1–2 days, optional/deferrable)
+### V2.3 — Mid-session retrieval
 
-**Goal:** Expose the DB and stats as MCP tools so external agents can interact with project data.
+The agent gains one tool: `recall(query, scope?)`. Used during a session when the agent decides it needs older context not in the system-prompt window. Result injected as a system note, surfaces in the next assistant turn.
 
-- `nexus/mcp/server.py` — MCP server, tools:
-  - `query_recent(project_id, source, limit)`
-  - `semantic_search(project_id, query, k)`
-  - `get_structural_stats(project_id, stat_name)`
-  - `log_event(...)`, `create_entity(...)`
-- Reuse `repository.py` and `specialist/stats.py` — no duplicate logic
+### V2.4 — Structural stats
 
-**Done when:** Claude Desktop or another MCP client can connect to the local server and run queries against your data.
+Per-domain stat functions: `vocab_mastery_distribution`, `daily_practice_streak`, `weekly_volume_per_muscle_group`, etc. Computed on demand; results join the system-prompt "current state" block.
 
-**Cuts:** Auth is single-user/local-only at this stage.
+### V2.5 — Periodic reflective summaries
 
----
+Weekly + monthly summary scopes. Background scheduler. Adds another tier above session summaries.
 
-## Phase 8 — Telegram client (2–3 days)
+### V2.6 — MCP server
 
-**Goal:** Production interface. Family/friends could use it.
-
-- `nexus/clients/telegram.py` — bot with handlers:
-  - `/start` → user lookup or creation, auth via telegram_id
-  - `/projects` → list user's projects
-  - `/use <project>` → set active project for the chat
-  - `/architect` → kick off interview (in-chat)
-  - default text → forward to specialist agent
-- Multi-user routing already trivial because everything is keyed on `project_id` + `user_id`
-
-**Done when:** You can fully use the system from Telegram on your phone.
-
----
-
-## Phase 9 — Polish & ops (ongoing)
-
-- Cost tracking per project (`observability/costs.py`)
-- Structured logging review
-- Backup/export commands (dump a project's data to JSON)
-- Privacy: per-project encryption key for sensitive content (defer until concrete need)
-- Observability dashboard (optional — Grafana over postgres metrics)
+Expose project data via MCP tools (`semantic_search`, `query_recent`, `get_structural_stats`, `log_event`). Lets external agents read/write the project's memory.
 
 ---
 
 ## Things explicitly NOT in this plan
 
-- LLM-generated SQLAlchemy models or any runtime codegen — replaced by DomainConfig.
-- Per-domain Docker provisioning step — replaced by a single fixed schema.
+- LLM-generated SQLAlchemy models or any runtime codegen.
+- Per-domain Docker provisioning step.
 - Schema-per-project hard isolation — `project_id` filtering until proven insufficient.
-- Web UI — Telegram and CLI cover the targeted use cases.
-- Multi-LLM routing inside a single conversation — single provider per project for now.
+- Web UI in v1.
+- Tool-calling per turn in v1 (deferred to V2.1).
 
 ## Risks worth flagging
 
-1. **Architect quality.** A bad interview produces a bad DomainConfig and the specialist behaves oddly. Mitigation: pydantic validation + always-on schema preview before saving + ability to edit YAML by hand.
-2. **Tool reliability.** LLMs sometimes call tools with wrong shapes. Mitigation: pydantic-validated tool inputs; on validation error, return error to LLM and let it retry once.
-3. **Embedding cost.** Re-embedding everything on every change is expensive. Mitigation: only embed on insert, not on every state update; have a `reindex` command for big changes.
-4. **State update bugs.** A buggy `updates_state` handler corrupts entity state silently. Mitigation: handlers are pure functions, tested directly; events are immutable so state can be rebuilt by replay if needed.
-5. **Domain abstraction leakage.** Fitness or a future domain may not fit. Mitigation: Phase 6 is explicitly the stress test; if it breaks, fix the abstraction before adding domain #3.
+1. **Architect interview quality.** A bad interview produces a bad plan. Mitigation: pydantic validation, plan preview before save, easy plan-revision flow in v2.
+2. **Session boundary ambiguity.** If the idle-timeout is too short, users get fragmented sessions; if too long, summaries are stale. Mitigation: per-domain default (20 min language, 60 min fitness), user-overrideable in `users.settings`.
+3. **Plan staleness.** Without v2 structured extraction, the plan doesn't "know" that Maria already aced cooking verbs unless the summarizer flips the item status. Mitigation: the summarize prompt explicitly asks for plan-item progress; review summaries during early v1 use and tune the prompt.
+4. **Summary quality drift over time.** Summaries are the *primary* form of long-term memory in v1. If they degrade, the system degrades. Mitigation: keep all raw messages forever (they're cheap); v2 can re-summarize from the raw transcript.
+5. **Domain abstraction leakage.** Phase 5 (fitness) is the explicit stress test. Reserve refactor budget there.
 
-## Suggested first three sessions
+## Suggested first-three-sessions order
 
-1. **Phase 0 + Phase 1**: get the repo and DB walking. Concrete, low-risk, lots of typing.
-2. **Phase 2**: the Architect. Most novel piece — worth tackling while energy is high.
-3. **Phase 3**: end-to-end specialist. Once this is up, every later phase is "extend a working system" rather than "build something new."
+1. **Phase 2**: plans + sessions migration + architect. The most novel piece, worth tackling while energy is high.
+2. **Phase 3**: specialist v1 loop. Once this works the v1 feedback loop is closed.
+3. **Phase 4**: Telegram. By the time this lands you can dogfood from your phone.

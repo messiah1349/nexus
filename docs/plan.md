@@ -62,8 +62,9 @@ Note: the v1 path uses only a subset of those tables (users, projects, messages,
 - `nexus/specialist/summarizer.py` — at session end:
   1. Load all session messages.
   2. LLM call with summarize prompt (domain-specific via `config.summary.prompt_style`).
-  3. Output: `(content, focus_tags, plan_item_status_update?, plan_revision?)`.
-  4. Write `summaries`, update `sessions`, patch plan items, optionally supersede plan.
+  3. Output: `(content, focus_tags, plan_item_index_addressed?, plan_item_status_update?, plan_revision?)`.
+  4. Write `summaries`, update `sessions` (including `plan_item_index` post-hoc from `plan_item_index_addressed`), patch plan items, optionally supersede plan. **Plan revisions apply autonomously** (coach-style, CLAUDE.md #9); the agent surfaces them in the next session's opening turn rather than gating them on user confirmation.
+- `nexus/specialist/prompts.py` — base + per-domain summarize prompts. The base specialist system prompt must instruct the LLM to (a) pick a focus from the active plans + recent summaries at session start, (b) state the chosen focus and check in with the user, and (c) mention any plan revision that landed since the last session.
 - `nexus/specialist/prompts.py` — base + per-domain summarize prompts.
 - CLI: `nexus chat --project-id ...` interactive REPL. `/end` to close session and trigger summary; otherwise idle timeout fires on next start.
 - CLI: `nexus session list --project-id ...` shows recent sessions + their summary status.

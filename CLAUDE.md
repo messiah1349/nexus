@@ -21,6 +21,7 @@ Design lives in `docs/`. Read these before making non-trivial changes:
 6. **Telegram is the primary client.** CLI exists for development iteration. The client layer is modular — adding a future web frontend should not require touching `specialist/`.
 7. **LLM provider is pluggable.** Anthropic is the first implementation. The interface in `nexus/llm/` is provider-agnostic and translates tool-use / chat shapes at the boundary. Don't leak Anthropic-specific shapes into `specialist/` or `architect/`.
 8. **Multi-tenant from day one.** Every row carries `project_id`; "siloed" is enforced by `WHERE project_id = ?`, not by separate databases.
+9. **Coach-style autonomy with transparency.** When deciding between (a) ask the user first, (b) silently apply, (c) apply and notify — default to (c). The agent acts like a human coach: proactive about plans, focus, and revisions, and transparent about them. Material changes (plan revisions, focus shifts, scope changes) are surfaced in the next user-facing turn. User override is always an easy natural-language path; no special command required. Don't narrate micro-decisions; do surface anything that affects the user's mental model of what's happening.
 
 ## What this project is *not* (in v1)
 

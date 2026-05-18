@@ -168,11 +168,15 @@ Everything above is concatenated into the system prompt + chat history. The LLM 
 At session end the **summarizer** runs:
 
 1. Load all messages in the session.
-2. Call LLM with a summarize prompt: produce `(content, focus_tags, plan_item_status_update?, plan_revision?)`.
+2. Call LLM with a summarize prompt: produce `(content, focus_tags, plan_item_index_addressed?, plan_item_status_update?, plan_revision?)`.
 3. Write `summaries` row with `scope='session'`, `session_id`.
-4. Update `sessions.ended_at`, `status='completed'`, `summary_id`.
+4. Update `sessions.ended_at`, `status='completed'`, `summary_id`. If `plan_item_index_addressed` is present, also set `sessions.plan_item_index` to that value (this is the only writer of `plan_item_index` — it's *not* set at session creation).
 5. If `plan_item_status_update` is present, mutate the relevant `plans.items[i].status` in place (it's a simple JSONB patch).
 6. If `plan_revision` is present, mark the current plan `status='superseded'`, create a new plan with `superseded_by` pointer.
+
+**Plan-revision behavior** (resolution of v0.2 open question #2): the summarizer applies revisions itself (coach-style autonomy, see CLAUDE.md decision #9). The user is *notified* at the next session start — the agent's opening turn surfaces "the plan changed because X; here's what's new". User can push back in natural language; pushback creates another plan revision in the opposite direction. No special command, no modal "accept / reject" prompt.
+
+**Session-focus selection** (resolution of v0.2 open question #2 alt): `sessions.plan_item_index` is *null* at session creation. The LLM, given the active plans + last K summaries in the system prompt, decides at the start of each session which item to work on and tells the user in its opening turn. User can redirect; the summarizer at session end records what was actually worked on by setting `plan_item_index`. We never store the LLM's session-start *intent* — only the post-hoc *truth* the summarizer extracts.
 
 ## Domain config (`projects.config`)
 
@@ -242,7 +246,11 @@ Things that **do not** live anywhere in v1 (deferred to v2):
 ## Open questions / decisions to revisit
 
 1. **Active-session collision.** What happens if two messages arrive into "the same project" from different chats while one session is active? For MVP single-chat-per-project, doesn't arise. Revisit when (if) web client lands.
-2. **Plan revision authorship.** Summarizer LLM can propose a plan revision. Should that revision auto-apply, or always require user confirmation in the next session? Recommend: small revisions (item reorder, status changes) auto-apply; large revisions (new items, scope changes) require user confirmation by showing them at the next session start.
-3. **`messages.metadata` size.** If model responses include large tool-call traces (in v2), `metadata` can grow. Cap or split. Not a v1 problem.
-4. **Embedding dimension.** Pinned at 1024 in migration 0001. Locked in for v2.
-5. **What "domain" config keys does the architect *itself* need vs the specialist?** Phase 2 will refine. Current draft has both reading the same `DomainConfig`; that may split.
+2. **`messages.metadata` size.** If model responses include large tool-call traces (in v2), `metadata` can grow. Cap or split. Not a v1 problem.
+3. **Embedding dimension.** Pinned at 1024 in migration 0001. Locked in for v2.
+4. **What "domain" config keys does the architect *itself* need vs the specialist?** Phase 2 will refine. Current draft has both reading the same `DomainConfig`; that may split.
+
+## Resolved decisions
+
+- **Plan revision authorship.** Summarizer applies revisions; agent surfaces them at next session start; user override is natural-language. See "Plan-revision behavior" above and CLAUDE.md decision #9.
+- **Session-focus selection.** LLM chooses focus at session start, tells the user, can be overridden. `sessions.plan_item_index` is written *only at session end* by the summarizer (post-hoc, what was actually done). See "Session-focus selection" above.

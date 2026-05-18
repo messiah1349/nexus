@@ -6,15 +6,19 @@ import uuid
 import typer
 
 from nexus import __version__
+from nexus.architect import ArchitectInterview, persist_architect_output
 from nexus.config import get_settings
 from nexus.db import repository as repo
 from nexus.db.engine import dispose_engine, session_scope
+from nexus.domains.registry import list_available_domains
 
 app = typer.Typer(no_args_is_help=True, help="Nexus CLI")
 user_app = typer.Typer(no_args_is_help=True, help="User commands")
 project_app = typer.Typer(no_args_is_help=True, help="Project commands")
+architect_app = typer.Typer(no_args_is_help=True, help="Architect (onboarding) commands")
 app.add_typer(user_app, name="user")
 app.add_typer(project_app, name="project")
+app.add_typer(architect_app, name="architect")
 
 
 def _run(coro) -> None:
@@ -105,6 +109,78 @@ def project_list(
                 return
             for p in projects:
                 typer.echo(f"{p.id}\t{p.domain}\t{p.name}")
+
+    _run(_do())
+
+
+@architect_app.command("domains")
+def architect_domains() -> None:
+    """List domains the architect can onboard."""
+    for d in list_available_domains():
+        typer.echo(d)
+
+
+@architect_app.command("run")
+def architect_run(
+    user_id: str = typer.Option(..., "--user-id"),
+    domain: str = typer.Option(..., "--domain", help="e.g. language_learning"),
+    no_persist: bool = typer.Option(
+        False, "--no-persist", help="Run interview but skip DB writes (dry run)"
+    ),
+) -> None:
+    """Interactive architect onboarding — interview the user and persist
+    the resulting project + plans atomically at the end.
+    """
+
+    try:
+        uid = uuid.UUID(user_id)
+    except ValueError as exc:
+        raise typer.BadParameter(f"--user-id is not a valid UUID: {user_id}") from exc
+
+    if domain not in list_available_domains():
+        raise typer.BadParameter(
+            f"unknown domain '{domain}'. available: "
+            f"{', '.join(list_available_domains()) or '(none)'}"
+        )
+
+    async def _do() -> None:
+        interview = ArchitectInterview(domain=domain)
+        typer.secho("Architect online. Ctrl-D or empty line to quit early.\n", fg="cyan")
+        opener = await interview.kick_off()
+        typer.secho(f"architect> {opener}\n", fg="green")
+
+        while not interview.done:
+            try:
+                user_input = input("you> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                typer.secho("\n(interview aborted)", fg="yellow")
+                return
+            if not user_input:
+                typer.secho("(empty — aborting)", fg="yellow")
+                return
+
+            reply, done = await interview.turn(user_input)
+            typer.secho(f"\narchitect> {reply}\n", fg="green")
+            if done:
+                break
+
+        if interview.proposal is None:
+            typer.secho("(no proposal produced — nothing to save)", fg="red")
+            raise typer.Exit(code=1)
+
+        if no_persist:
+            typer.secho("--no-persist set; skipping DB writes.", fg="yellow")
+            typer.echo(interview.proposal.model_dump_json(indent=2))
+            return
+
+        async with session_scope() as session:
+            project, plans = await persist_architect_output(
+                session, user_id=uid, domain=domain, proposal=interview.proposal
+            )
+            typer.secho("\nSaved.", fg="cyan")
+            typer.echo(f"project_id\t{project.id}")
+            for plan in plans:
+                typer.echo(f"plan\t{plan.horizon}\t{plan.id}\t{plan.name}")
 
     _run(_do())
 

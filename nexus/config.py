@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     anthropic_api_key: str | None = Field(default=None, alias="ANTHROPIC_API_KEY")
     telegram_bot_token: str | None = Field(default=None, alias="TELEGRAM_BOT_TOKEN")
 
+    llm_provider: str = Field(default="anthropic", alias="LLM_PROVIDER")
+    llm_model: str = Field(default="claude-sonnet-4-6", alias="LLM_MODEL")
+
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     env: str = Field(default="dev", alias="ENV")
 

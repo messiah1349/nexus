@@ -15,18 +15,19 @@ Notation:
 
 Maria sends `/architect` in Telegram. Bot picks her domain (`language_learning`) and runs the interview.
 
-The architect interview is itself a session with `kind='architect'`. Messages persist as the interview proceeds; nothing else writes to the DB during the interview turns. At the end of the interview:
+In v1 the architect interview runs **entirely in memory** — no `sessions` row, no `messages` rows (the project doesn't exist yet, and `messages.project_id` is NOT NULL). The interview is just a conversation buffer held by the architect process. At the end:
 
 1. The architect LLM emits a **structured proposal** containing:
    - A `DomainConfig` (validated against `nexus.domains.base.DomainConfig`).
    - One or more `Plan`s — typically a `yearly` and a `weekly`, sometimes a `level_check` if Maria wasn't sure of her starting point.
-2. `nexus/architect/persist.py` validates the proposal and writes:
-   - `db.WRITE projects.config = { domain: language_learning, profile: { language: spanish, proficiency_target: B2, daily_minutes_target: 20 }, sessions: { idle_timeout_minutes: 30 }, summary: { prompt_style: language_learning, allow_plan_revision: true } }`
-   - `db.WRITE plans { id=P_year, horizon=yearly, name="Spanish B2 by Dec 2026", items=[12 monthly milestones], status=active }`
-   - `db.WRITE plans { id=P_week, horizon=weekly, name="Week of 2026-05-18", items=[{seq:1, title:"Cooking verbs", status:pending}, {seq:2, title:"Conditional tense intro", status:pending}, {seq:3, title:"Restaurant vocabulary", status:pending}], status=active }`
-3. The architect session ends. Its summary is the plan itself — no separate `summaries` row is required in v1.
+2. `nexus/architect/persist.py` validates the proposal and writes atomically inside one transaction:
+   - `db.WRITE projects { id=P, user_id=Maria, name=..., domain=language_learning, config={...} }`
+   - `db.WRITE plans { id=P_year, project_id=P, horizon=yearly, name="Spanish B2 by Dec 2026", items=[12 monthly milestones], status=active }`
+   - `db.WRITE plans { id=P_week, project_id=P, horizon=weekly, name="Week of 2026-05-18", items=[{seq:1, title:"Cooking verbs", status:pending}, {seq:2, title:"Conditional tense intro", status:pending}, {seq:3, title:"Restaurant vocabulary", status:pending}], status=active }`
 
-**End state:** `projects.config` populated, two active plans for Maria's Spanish project.
+**End state:** project row exists with valid `config`; two active plans. Interview transcript is discarded — re-introducing it as a v2 sessions row is an open item.
+
+**Why no architect session?** Persisting the interview as messages requires the project to exist; the project's `config` is the output of the interview. Bootstrap chicken-and-egg. V1 keeps it simple by treating the architect as a transactional batch job.
 
 ---
 

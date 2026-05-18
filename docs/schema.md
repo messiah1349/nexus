@@ -89,20 +89,23 @@ A bounded interaction. The session opens lazily on the first message after no ac
 |---|---|---|
 | id | uuid pk | |
 | project_id | uuid fk projects(id) | cascade |
-| plan_id | uuid fk plans(id) nullable | the plan this session works against; null for architect sessions |
-| plan_item_index | int nullable | which item in `plan.items[]` was planned |
-| kind | text not null default 'lesson' | `lesson` / `architect` / `plan_review` |
+| plan_id | uuid fk plans(id) nullable | the plan this session works against |
+| plan_item_index | int nullable | written *post-hoc* by the summarizer — which item was actually addressed |
+| kind | text not null default 'lesson' | `lesson` (v1); `plan_review` and others reserved for v2 |
 | started_at | timestamptz default now() | |
 | ended_at | timestamptz nullable | |
 | end_reason | text nullable | `explicit` / `timeout` / `project_archived` |
 | status | text not null default 'active' | `active` / `completed` / `abandoned` |
-| summary_id | uuid fk summaries(id) nullable | set after summarizer runs |
 | attributes | jsonb default '{}' | `{planned_topic, actual_topic, deviation}` |
 | created_at | timestamptz default now() | |
 
 Indexes: `(project_id, started_at desc)`, `(project_id) WHERE status='active'`.
 
+**One-directional session ↔ summary link.** Sessions used to carry a `summary_id` FK back to summaries. We dropped it to avoid a circular FK in migration 0002; `summaries.session_id` is the only join. "Was this session summarized?" becomes `EXISTS (SELECT 1 FROM summaries WHERE session_id = ?)` — one hop, no denormalization risk.
+
 **Active-session uniqueness:** we *don't* enforce one-active-session-per-project at the DB level. Phone + laptop could in principle have parallel sessions; the application resolves which session a given chat goes to via `users.settings`.
+
+**Architect interview is *not* a `sessions` row in v1.** The interview runs in-memory; the project doesn't exist until the architect finishes, and `messages.project_id` is NOT NULL. Architect persists project + config + plans atomically at the end of the interview, then exits. Re-introducing the architect as a session is a v2 concern once we want to keep interview transcripts.
 
 ### `messages` [v1]
 
@@ -137,7 +140,7 @@ One row per session in v1 (`scope='session'`). Other scopes (`daily`, `weekly`, 
 
 Indexes: `(project_id, scope, period_end desc)`, `(session_id)`.
 
-**Symmetry with sessions:** `sessions.summary_id` ↔ `summaries.session_id` — both directions present so queries from either side are one-hop. We accept the small denormalization risk; the summarizer writes both atomically.
+**Session ↔ summary link is one-directional** (`summaries.session_id` only). See `sessions` for rationale.
 
 ## Tables — v2-reserved (created by migration 0001, idle in v1)
 
@@ -170,7 +173,7 @@ At session end the **summarizer** runs:
 1. Load all messages in the session.
 2. Call LLM with a summarize prompt: produce `(content, focus_tags, plan_item_index_addressed?, plan_item_status_update?, plan_revision?)`.
 3. Write `summaries` row with `scope='session'`, `session_id`.
-4. Update `sessions.ended_at`, `status='completed'`, `summary_id`. If `plan_item_index_addressed` is present, also set `sessions.plan_item_index` to that value (this is the only writer of `plan_item_index` — it's *not* set at session creation).
+4. Update `sessions.ended_at`, `status='completed'`. If `plan_item_index_addressed` is present, also set `sessions.plan_item_index` to that value (this is the only writer of `plan_item_index` — it's *not* set at session creation). The session → summary link is one-directional: query `summaries WHERE session_id = ?` to find the summary; no `sessions.summary_id` column.
 5. If `plan_item_status_update` is present, mutate the relevant `plans.items[i].status` in place (it's a simple JSONB patch).
 6. If `plan_revision` is present, mark the current plan `status='superseded'`, create a new plan with `superseded_by` pointer.
 

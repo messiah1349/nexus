@@ -1,0 +1,29 @@
+# Default DomainConfig for language_learning projects.
+# The architect uses this as a starting point and customizes per-user.
+
+domain: language_learning
+schema_version: 2
+
+profile:
+  language: spanish        # placeholder; architect overrides
+  proficiency_target: B2
+  daily_minutes_target: 20
+
+focus_tags:
+  - vocabulary
+  - grammar
+  - conversation
+  - listening
+
+sessions:
+  idle_timeout_minutes: 30
+  expected_duration_minutes: 20
+
+summary:
+  prompt_style: language_learning
+  allow_plan_revision: true
+
+plan_horizons:
+  - yearly
+  - weekly
+  - level_check

@@ -79,3 +79,42 @@ class ArchitectProposal(BaseModel):
     project_name: str
     config: DomainConfig
     plans: list[PlanProposal]
+
+
+# ---------------------------------------------------------------------------
+# Summarizer output — emitted by the specialist's summarize prompt at session
+# end. Drives `summaries` row creation, plan-item patches, and plan revisions.
+# ---------------------------------------------------------------------------
+
+
+class PlanItemUpdate(BaseModel):
+    """In-place patch to a single item on an existing plan."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    plan_id: str  # UUID as string; parsed at the persistence boundary
+    item_index: int
+    status: str  # 'pending' | 'in_progress' | 'completed' | 'skipped'
+
+
+class PlanRevision(BaseModel):
+    """Replace an existing plan with a new one (supersede chain)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    plan_id: str  # the plan being superseded
+    reason: str
+    new_plan: PlanProposal
+
+
+class SessionSummary(BaseModel):
+    """Structured output of the summarize prompt — one row in `summaries`
+    plus optional plan mutations."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    content: str
+    focus_tags: list[str] = Field(default_factory=list)
+    plan_item_index_addressed: int | None = None
+    plan_item_update: PlanItemUpdate | None = None
+    plan_revision: PlanRevision | None = None

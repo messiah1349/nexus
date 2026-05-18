@@ -122,6 +122,20 @@ async def list_messages_for_session(
     return list(result.scalars().all())
 
 
+async def last_message_for_session(
+    session: AsyncSession, session_id: uuid.UUID
+) -> Message | None:
+    """Most recent message in a session, or None if the session is empty.
+    Used by the lifecycle to detect idle-timeout staleness."""
+    result = await session.execute(
+        select(Message)
+        .where(Message.session_id == session_id)
+        .order_by(desc(Message.occurred_at))
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
 async def add_event(
     session: AsyncSession,
     *,

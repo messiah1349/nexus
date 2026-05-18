@@ -11,14 +11,19 @@ from nexus.settings import get_settings
 from nexus.db import repository as repo
 from nexus.db.engine import dispose_engine, session_scope
 from nexus.domains.registry import list_available_domains
+from nexus.specialist import SpecialistAgent, end_session_with_summary
+from sqlalchemy import select, desc as sa_desc
+from nexus.db.models import Session as DBSession
 
 app = typer.Typer(no_args_is_help=True, help="Nexus CLI")
 user_app = typer.Typer(no_args_is_help=True, help="User commands")
 project_app = typer.Typer(no_args_is_help=True, help="Project commands")
 architect_app = typer.Typer(no_args_is_help=True, help="Architect (onboarding) commands")
+session_app = typer.Typer(no_args_is_help=True, help="Session commands")
 app.add_typer(user_app, name="user")
 app.add_typer(project_app, name="project")
 app.add_typer(architect_app, name="architect")
+app.add_typer(session_app, name="session")
 
 
 def _run(coro) -> None:
@@ -181,6 +186,89 @@ def architect_run(
             typer.echo(f"project_id\t{project.id}")
             for plan in plans:
                 typer.echo(f"plan\t{plan.horizon}\t{plan.id}\t{plan.name}")
+
+    _run(_do())
+
+
+@app.command()
+def chat(
+    project_id: str = typer.Option(..., "--project-id"),
+) -> None:
+    """Interactive chat with the specialist. Type `/end` to close the session
+    and trigger the summarizer."""
+
+    try:
+        pid = uuid.UUID(project_id)
+    except ValueError as exc:
+        raise typer.BadParameter(f"--project-id is not a valid UUID: {project_id}") from exc
+
+    async def _do() -> None:
+        agent = SpecialistAgent(project_id=pid)
+        typer.secho(
+            "Chat ready. `/end` to close + summarize the session, Ctrl-D to leave it open.\n",
+            fg="cyan",
+        )
+        active_session_id: uuid.UUID | None = None
+        while True:
+            try:
+                user_input = input("you> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                typer.secho("\n(leaving session open)", fg="yellow")
+                return
+            if not user_input:
+                continue
+            if user_input.lower() in ("/end", "/end_lesson"):
+                if active_session_id is None:
+                    typer.secho("(no active session yet — nothing to summarize)", fg="yellow")
+                    return
+                typer.secho("\n(summarizing…)\n", fg="cyan")
+                async with session_scope() as db:
+                    summary = await end_session_with_summary(
+                        db, session_id=active_session_id, reason="explicit"
+                    )
+                    typer.echo(f"summary_id\t{summary.id}")
+                    typer.echo(f"focus_tags\t{', '.join(summary.focus_tags) or '—'}")
+                    typer.echo(f"\n{summary.content}\n")
+                return
+
+            async with session_scope() as db:
+                reply, sess = await agent.handle_message(db, user_input)
+                active_session_id = sess.id
+            typer.secho(f"\ncoach> {reply}\n", fg="green")
+
+    _run(_do())
+
+
+@session_app.command("list")
+def session_list(
+    project_id: str = typer.Option(..., "--project-id"),
+    limit: int = typer.Option(10, "--limit"),
+) -> None:
+    """List recent sessions for a project."""
+
+    try:
+        pid = uuid.UUID(project_id)
+    except ValueError as exc:
+        raise typer.BadParameter(f"--project-id is not a valid UUID: {project_id}") from exc
+
+    async def _do() -> None:
+        async with session_scope() as db:
+            result = await db.execute(
+                select(DBSession)
+                .where(DBSession.project_id == pid)
+                .order_by(sa_desc(DBSession.started_at))
+                .limit(limit)
+            )
+            sessions = list(result.scalars().all())
+            if not sessions:
+                typer.echo("(no sessions)")
+                return
+            typer.echo("id\tstarted_at\tstatus\tend_reason\tplan_item_index")
+            for s in sessions:
+                typer.echo(
+                    f"{s.id}\t{s.started_at.isoformat()}\t{s.status}\t"
+                    f"{s.end_reason or '—'}\t{s.plan_item_index if s.plan_item_index is not None else '—'}"
+                )
 
     _run(_do())
 

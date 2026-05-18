@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from anthropic import AsyncAnthropic
 
-from nexus.config import get_settings
+from nexus.settings import get_settings
 from nexus.llm.base import ChatMessage, LLMClient
 
 

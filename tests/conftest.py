@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from nexus.config import get_settings
+from nexus.settings import get_settings
 
 
 @pytest_asyncio.fixture(scope="session")

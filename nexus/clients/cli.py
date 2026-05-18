@@ -7,7 +7,7 @@ import typer
 
 from nexus import __version__
 from nexus.architect import ArchitectInterview, persist_architect_output
-from nexus.config import get_settings
+from nexus.settings import get_settings
 from nexus.db import repository as repo
 from nexus.db.engine import dispose_engine, session_scope
 from nexus.domains.registry import list_available_domains

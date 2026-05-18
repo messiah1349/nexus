@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from alembic import context
 
-from nexus.config import get_settings
+from nexus.settings import get_settings
 from nexus.db.models import Base
 
 config = context.config

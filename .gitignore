@@ -35,3 +35,7 @@ data/
 
 # Claude Code local settings (per-machine)
 .claude/settings.local.json
+
+# Build artifacts
+dist/
+build/

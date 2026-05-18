@@ -11,7 +11,7 @@ def test_cli_app_constructs() -> None:
 
 
 def test_settings_load() -> None:
-    from nexus.config import get_settings
+    from nexus.settings import get_settings
 
     settings = get_settings()
     assert settings.postgres_url.startswith("postgresql")

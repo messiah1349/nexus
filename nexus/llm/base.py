@@ -12,7 +12,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-from nexus.config import get_settings
+from nexus.settings import get_settings
 
 
 class ChatMessage(BaseModel):

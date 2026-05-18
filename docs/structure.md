@@ -19,7 +19,15 @@ memory_assistant/
 │
 ├── nexus/
 │   ├── __init__.py
-│   ├── config.py
+│   ├── settings.py             # env-var loading via pydantic-settings
+│   │
+│   ├── config/                 # human-tunable assets (Phase 2)
+│   │   ├── loaders.py          # load_prompt, render_prompt, load_domain_yaml
+│   │   ├── prompts/
+│   │   │   └── architect_system.md     # .md, $placeholder substitution
+│   │   └── domains/
+│   │       ├── language_learning.yaml
+│   │       └── fitness.yaml    # (Phase 5)
 │   │
 │   ├── db/                     # Phase 1
 │   │   ├── engine.py
@@ -31,15 +39,13 @@ memory_assistant/
 │   │   ├── anthropic.py
 │   │   └── tokens.py
 │   │
-│   ├── domains/                # Phase 2
-│   │   ├── base.py             # pydantic DomainConfig schema
-│   │   ├── registry.py
-│   │   ├── language_learning.yaml
-│   │   └── fitness.yaml        # (Phase 5)
+│   ├── domains/                # Phase 2 — pydantic schemas only
+│   │   ├── base.py             # DomainConfig + ArchitectProposal
+│   │   └── registry.py         # validates YAML from nexus.config
 │   │
 │   ├── architect/              # Phase 2
 │   │   ├── interview.py
-│   │   ├── prompts.py
+│   │   ├── prompts.py          # thin wrapper around render_prompt
 │   │   └── persist.py
 │   │
 │   ├── specialist/             # Phase 3

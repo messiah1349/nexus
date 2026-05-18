@@ -1,37 +1,22 @@
-"""Load and validate domain configs shipped with the codebase.
+"""Load and validate domain configs from `nexus/config/domains/*.yaml`.
 
-These YAML files are the *defaults* — the architect uses them as starting
-points and tailors per-user instances of `DomainConfig` from them. The
-registry doesn't talk to the database.
+The registry is a thin wrapper over `nexus.config.loaders` that adds pydantic
+validation via `DomainConfig`. Code that just needs the raw YAML can call
+`load_domain_yaml` directly; code that needs a typed config goes through
+`load_domain_default` here.
 """
 
 from __future__ import annotations
 
 from functools import cache
-from pathlib import Path
 
-import yaml
-
+from nexus.config.loaders import list_available_domains, load_domain_yaml
 from nexus.domains.base import DomainConfig
 
-_DOMAINS_DIR = Path(__file__).parent
-
-
-@cache
-def list_available_domains() -> list[str]:
-    """All domain YAML names (without `.yaml`)."""
-    return sorted(p.stem for p in _DOMAINS_DIR.glob("*.yaml"))
+__all__ = ["list_available_domains", "load_domain_default"]
 
 
 @cache
 def load_domain_default(domain: str) -> DomainConfig:
-    """Load `nexus/domains/<domain>.yaml` and validate as a `DomainConfig`."""
-    path = _DOMAINS_DIR / f"{domain}.yaml"
-    if not path.exists():
-        available = ", ".join(list_available_domains()) or "(none)"
-        raise ValueError(
-            f"unknown domain '{domain}'. available: {available}"
-        )
-    with path.open("r", encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
-    return DomainConfig.model_validate(data)
+    """Load the domain YAML and validate as a `DomainConfig`."""
+    return DomainConfig.model_validate(load_domain_yaml(domain))

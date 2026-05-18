@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     BigInteger,
+    Date,
     DateTime,
     ForeignKey,
     Index,
@@ -88,6 +89,92 @@ class Project(Base):
             "ix_projects_user_active",
             "user_id",
             postgresql_where=text("archived_at IS NULL"),
+        ),
+    )
+
+
+class Plan(Base):
+    __tablename__ = "plans"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    horizon: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'active'")
+    )
+    items: Mapped[list] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    attributes: Mapped[dict] = _jsonb_default()
+    target_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    superseded_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("plans.id", name="fk_plans_superseded_by_plans"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = _now()
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+    archived_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        Index("ix_plans_project_status_horizon", "project_id", "status", "horizon"),
+        Index(
+            "ix_plans_project_horizon_active",
+            "project_id",
+            "horizon",
+            postgresql_where=text("status = 'active'"),
+        ),
+    )
+
+
+class Session(Base):
+    __tablename__ = "sessions"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    plan_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("plans.id", name="fk_sessions_plan_id_plans"),
+        nullable=True,
+    )
+    plan_item_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    kind: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'lesson'")
+    )
+    started_at: Mapped[datetime] = _now()
+    ended_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    end_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'active'")
+    )
+    attributes: Mapped[dict] = _jsonb_default()
+    created_at: Mapped[datetime] = _now()
+
+    __table_args__ = (
+        Index("ix_sessions_project_started", "project_id", "started_at"),
+        Index(
+            "ix_sessions_project_active",
+            "project_id",
+            postgresql_where=text("status = 'active'"),
         ),
     )
 
@@ -180,10 +267,13 @@ class Message(Base):
         ForeignKey("projects.id", ondelete="CASCADE"),
         nullable=False,
     )
+    session_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("sessions.id", name="fk_messages_session_id_sessions", ondelete="SET NULL"),
+        nullable=True,
+    )
     role: Mapped[str] = mapped_column(Text, nullable=False)
     content: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Python attr is `meta` to avoid clashing with SQLAlchemy's reserved `metadata`;
-    # the column itself is named `metadata` in the DB to match docs/schema.md.
     meta: Mapped[dict] = mapped_column(
         "metadata", JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )
@@ -195,6 +285,7 @@ class Message(Base):
 
     __table_args__ = (
         Index("ix_messages_project_occurred", "project_id", "occurred_at"),
+        Index("ix_messages_session_occurred", "session_id", "occurred_at"),
     )
 
 
@@ -207,6 +298,11 @@ class Summary(Base):
         ForeignKey("projects.id", ondelete="CASCADE"),
         nullable=False,
     )
+    session_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("sessions.id", name="fk_summaries_session_id_sessions", ondelete="SET NULL"),
+        nullable=True,
+    )
     scope: Mapped[str] = mapped_column(Text, nullable=False)
     period_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     period_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -218,6 +314,7 @@ class Summary(Base):
 
     __table_args__ = (
         Index("ix_summaries_project_scope_period", "project_id", "scope", "period_end"),
+        Index("ix_summaries_session", "session_id"),
     )
 
 

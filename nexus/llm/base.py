@@ -49,4 +49,8 @@ def get_llm_client() -> LLMClient:
         from nexus.llm.anthropic import AnthropicClient
 
         return AnthropicClient()
+    if provider == "gemini":
+        from nexus.llm.gemini import GeminiClient
+
+        return GeminiClient()
     raise ValueError(f"unknown LLM provider: {settings.llm_provider!r}")

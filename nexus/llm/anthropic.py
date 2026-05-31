@@ -14,6 +14,8 @@ from nexus.llm.base import ChatMessage, LLMClient
 
 
 class AnthropicClient(LLMClient):
+    DEFAULT_MODEL = "claude-sonnet-4-6"
+
     def __init__(self, *, api_key: str | None = None, model: str | None = None) -> None:
         settings = get_settings()
         resolved_key = api_key or settings.anthropic_api_key
@@ -22,7 +24,7 @@ class AnthropicClient(LLMClient):
                 "ANTHROPIC_API_KEY is not set — add it to .env or pass api_key="
             )
         self._client = AsyncAnthropic(api_key=resolved_key)
-        self._default_model = model or settings.llm_model
+        self._default_model = model or settings.llm_model or self.DEFAULT_MODEL
 
     async def chat(
         self,

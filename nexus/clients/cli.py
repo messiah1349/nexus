@@ -239,6 +239,18 @@ def chat(
     _run(_do())
 
 
+@app.command("bot")
+def bot_run() -> None:
+    """Start the Telegram bot (with in-process idle-timeout sweeper).
+
+    Requires TELEGRAM_BOT_TOKEN in env / .env / ~/.zshrc. Blocks until
+    interrupted (Ctrl-C).
+    """
+    from nexus.clients.telegram import NexusBot
+
+    NexusBot().run()
+
+
 @session_app.command("list")
 def session_list(
     project_id: str = typer.Option(..., "--project-id"),

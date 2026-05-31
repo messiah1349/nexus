@@ -21,13 +21,16 @@ memory_assistant/
 │   ├── __init__.py
 │   ├── settings.py             # env-var loading via pydantic-settings
 │   │
-│   ├── config/                 # human-tunable assets (Phase 2)
+│   ├── config/                 # human-tunable assets
 │   │   ├── loaders.py          # load_prompt, render_prompt, load_domain_yaml
-│   │   ├── prompts/
-│   │   │   └── architect_system.md     # .md, $placeholder substitution
+│   │   ├── prompts/            # .md, $placeholder substitution
+│   │   │   ├── architect_system.md
+│   │   │   ├── specialist_system.md
+│   │   │   ├── summarize_language_learning.md
+│   │   │   └── summarize_fitness.md
 │   │   └── domains/
 │   │       ├── language_learning.yaml
-│   │       └── fitness.yaml    # (Phase 5)
+│   │       └── fitness.yaml
 │   │
 │   ├── db/                     # Phase 1
 │   │   ├── engine.py

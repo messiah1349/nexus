@@ -1,0 +1,33 @@
+# Default DomainConfig for fitness projects.
+# The architect uses this as a starting point and customizes per-user.
+
+domain: fitness
+schema_version: 2
+
+profile:
+  units: metric              # 'metric' or 'imperial' — architect tailors
+  experience_level: intermediate  # 'beginner' / 'intermediate' / 'advanced'
+  training_focus: strength   # 'strength' / 'hypertrophy' / 'conditioning' / 'general'
+  equipment: full_gym        # 'full_gym' / 'home_gym' / 'bodyweight' / 'minimal'
+
+focus_tags:
+  - strength
+  - hypertrophy
+  - conditioning
+  - recovery
+  - nutrition
+
+sessions:
+  # Workouts run longer than language lessons; give the timeout more headroom
+  # so a user mid-set doesn't get prematurely summarized.
+  idle_timeout_minutes: 60
+  expected_duration_minutes: 60
+
+summary:
+  prompt_style: fitness
+  allow_plan_revision: true
+
+plan_horizons:
+  - yearly
+  - weekly
+  - level_check

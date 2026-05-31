@@ -31,13 +31,13 @@ def test_explicit_model_overrides_default() -> None:
     assert client._default_model == "gemini-2.5-pro"
 
 
-def test_missing_api_key_raises() -> None:
-    import os
-
-    # Ensure no GEMINI_API_KEY in env nor settings cache
-    with patch.dict(os.environ, {}, clear=True):
-        with pytest.raises(ValueError, match="GEMINI_API_KEY"):
-            GeminiClient()
+def test_missing_api_key_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The session-level _isolate_test_env already points $HOME at an empty
+    # tmpdir and cwd at one without a .env, so there's no shell-rc / .env
+    # source. Just make sure no GEMINI_API_KEY is in the env.
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    with pytest.raises(ValueError, match="GEMINI_API_KEY"):
+        GeminiClient()
 
 
 async def test_chat_translates_roles_and_returns_assistant_message() -> None:

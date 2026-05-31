@@ -1,10 +1,42 @@
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# python-dotenv emits warnings to its logger when it can't parse a line
+# (e.g. aliases, conditionals, function definitions in ~/.zshrc). Those
+# lines are intentionally ignored — silence the noise so a busy .zshrc
+# doesn't print warnings on every `nexus` invocation.
+logging.getLogger("dotenv.main").setLevel(logging.ERROR)
+
+
+def _env_file_sources() -> tuple[str, ...]:
+    """Files pydantic-settings will read, in increasing precedence order.
+
+    Higher-precedence sources override earlier ones; environment variables
+    always win over file values.
+
+    - ``~/.zshrc`` (if present) — many users keep API keys here behind
+      ``export FOO=bar``; python-dotenv tolerates the `export` prefix.
+      Lines using zsh-specific syntax (aliases, conditionals, functions)
+      are silently skipped — only simple ``export KEY=VALUE`` lines are
+      picked up. Lowest precedence.
+    - ``.env`` in the project root. Higher precedence; lets a project
+      override what's in the user's shell rc.
+    """
+    sources: list[str] = []
+    home_zshrc = Path.home() / ".zshrc"
+    if home_zshrc.exists():
+        sources.append(str(home_zshrc))
+    sources.append(".env")
+    return tuple(sources)
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -26,4 +58,7 @@ class Settings(BaseSettings):
 
 
 def get_settings() -> Settings:
-    return Settings()
+    # Re-evaluate sources at each call so tests (and runtime $HOME changes)
+    # see the current shell rc / .env state. The cost is one stat per .zshrc
+    # / .env file per call, which is negligible.
+    return Settings(_env_file=_env_file_sources())

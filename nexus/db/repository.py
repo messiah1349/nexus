@@ -427,3 +427,71 @@ async def recent_summaries(
         .limit(limit)
     )
     return list(result.scalars().all())
+
+
+# ---------------------------------------------------------------------------
+# Telegram-flavoured helpers (Phase 4)
+# ---------------------------------------------------------------------------
+
+
+async def get_or_create_user_by_telegram_id(
+    session: AsyncSession,
+    telegram_id: int,
+    *,
+    display_name: str | None = None,
+) -> User:
+    """Fetch the user identified by ``telegram_id`` or create one. Used by the
+    Telegram bot's ``/start`` handler (and implicitly on every message)."""
+    user = await get_user_by_telegram_id(session, telegram_id)
+    if user is not None:
+        return user
+    return await create_user(
+        session, telegram_id=telegram_id, display_name=display_name
+    )
+
+
+_ACTIVE_PROJECT_KEY = "active_project_per_chat"
+
+
+async def set_active_project_for_chat(
+    session: AsyncSession,
+    *,
+    user: User,
+    chat_id: int,
+    project_id: uuid.UUID,
+) -> None:
+    """Persist `(chat_id → project_id)` into ``users.settings.active_project_per_chat``.
+
+    JSONB columns in SQLAlchemy don't track in-place mutation; assign a new
+    dict so the dirty bit fires.
+    """
+    settings = dict(user.settings or {})
+    mapping = dict(settings.get(_ACTIVE_PROJECT_KEY, {}))
+    mapping[str(chat_id)] = str(project_id)
+    settings[_ACTIVE_PROJECT_KEY] = mapping
+    user.settings = settings
+    await session.flush()
+
+
+async def get_active_project_for_chat(
+    user: User, chat_id: int
+) -> uuid.UUID | None:
+    """Return the project the given chat is currently bound to, if any."""
+    settings = user.settings or {}
+    mapping = settings.get(_ACTIVE_PROJECT_KEY, {})
+    raw = mapping.get(str(chat_id))
+    if raw is None:
+        return None
+    try:
+        return uuid.UUID(raw)
+    except ValueError:
+        return None
+
+
+async def list_active_sessions(session: AsyncSession) -> list[Session]:
+    """Every currently-active session across every project. Used by the
+    idle-timeout sweeper."""
+    result = await session.execute(
+        select(Session).where(Session.status == "active")
+    )
+    return list(result.scalars().all())

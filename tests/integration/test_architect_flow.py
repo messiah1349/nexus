@@ -76,7 +76,8 @@ def _sample_proposal() -> ArchitectProposal:
     )
 
 
-def test_build_architect_prompt_includes_existing_names() -> None:
+def test_build_architect_prompt_includes_existing_projects() -> None:
+    from nexus.architect import ExistingProjectStub
     from nexus.architect.prompts import build_architect_prompt
     from nexus.domains.registry import load_domain_default
 
@@ -85,12 +86,52 @@ def test_build_architect_prompt_includes_existing_names() -> None:
     empty = build_architect_prompt(cfg)
     assert "(none)" in empty
 
-    with_names = build_architect_prompt(
-        cfg, existing_project_names=["Spanish", "French"]
+    with_stubs = build_architect_prompt(
+        cfg,
+        existing_projects=[
+            ExistingProjectStub(
+                id="00000000-0000-0000-0000-000000000001",
+                name="Spanish",
+                profile={"language": "spanish", "proficiency_target": "B2"},
+            ),
+        ],
     )
-    assert "  - Spanish" in with_names
-    assert "  - French" in with_names
-    assert "MUST clearly differ" in with_names
+    assert "Spanish" in with_stubs
+    assert "B2" in with_stubs
+    assert "USE_EXISTING" in with_stubs
+    # The "Path A" rule must be present so the LLM knows it can route to use-existing.
+    assert "semantic match found" in with_stubs
+
+
+def test_extract_use_existing_happy_path() -> None:
+    from nexus.architect import extract_use_existing
+
+    text = (
+        'Sounds like the existing one.\n\n'
+        '<<<USE_EXISTING>>>\n{"project_id": "00000000-0000-0000-0000-000000000001"}\n'
+        '<<<END_USE_EXISTING>>>\n\nLet me bind that.'
+    )
+    decision = extract_use_existing(text)
+    assert decision is not None
+    assert decision.project_id == "00000000-0000-0000-0000-000000000001"
+
+
+def test_extract_use_existing_returns_none_when_absent() -> None:
+    from nexus.architect import extract_use_existing
+
+    assert extract_use_existing("plain conversation, no marker") is None
+
+
+def test_extract_use_existing_raises_on_bad_json() -> None:
+    import pytest
+
+    from nexus.architect.interview import (
+        UseExistingParseError,
+        extract_use_existing,
+    )
+
+    with pytest.raises(UseExistingParseError):
+        extract_use_existing("<<<USE_EXISTING>>>not-json<<<END_USE_EXISTING>>>")
 
 
 def test_extract_proposal_happy_path() -> None:

@@ -44,7 +44,7 @@ def test_render_prompt_substitutes_placeholders() -> None:
         "architect_system",
         domain="fitness",
         default_config_json='{"placeholder": "value"}',
-        existing_project_names="(none)",
+        existing_projects_detail="(none)",
     )
     assert "Domain: fitness" in rendered
     assert '"placeholder": "value"' in rendered

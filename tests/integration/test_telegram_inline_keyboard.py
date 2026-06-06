@@ -267,7 +267,7 @@ async def test_architect_no_existing_starts_interview_directly(
         await bot.cmd_architect(update, ctx)
 
     MockAI.assert_called_once_with(
-        domain="language_learning", existing_project_names=None
+        domain="language_learning", existing_projects=None
     )
     update.message.reply_text.assert_awaited_with(opener)
 
@@ -327,7 +327,7 @@ async def test_architect_ignores_other_domain_projects(
         ctx = SimpleNamespace(args=["language_learning"])
         await bot.cmd_architect(update, ctx)
         MockAI.assert_called_once_with(
-            domain="language_learning", existing_project_names=None
+            domain="language_learning", existing_projects=None
         )
 
 
@@ -354,9 +354,14 @@ async def test_architect_new_callback_passes_existing_names(
         )
         await bot.on_callback_query(update, context=SimpleNamespace())
 
-    MockAI.assert_called_once_with(
-        domain="language_learning", existing_project_names=["Spanish"]
-    )
+    # The architect was given the existing project as a rich stub
+    # (name + profile + id) so it can do semantic similarity in-interview.
+    MockAI.assert_called_once()
+    kwargs = MockAI.call_args.kwargs
+    assert kwargs["domain"] == "language_learning"
+    stubs = kwargs["existing_projects"]
+    assert len(stubs) == 1
+    assert stubs[0].name == "Spanish"
     update.callback_query.answer.assert_awaited_once()
     update.callback_query.edit_message_text.assert_awaited_with(opener)
 
@@ -371,3 +376,97 @@ async def test_architect_new_callback_unknown_domain(bot: NexusBot) -> None:
     update.callback_query.answer.assert_awaited_once()
     msg = update.callback_query.edit_message_text.call_args.args[0]
     assert "Unknown domain" in msg
+
+
+# ---------------------------------------------------------------------------
+# Mid-interview semantic match → use-existing dispatch
+# ---------------------------------------------------------------------------
+
+
+def _make_update_for_on_text(
+    *, telegram_id: int, chat_id: int, text: str
+) -> SimpleNamespace:
+    """Update shape that ``on_text`` reads — needs effective_user,
+    effective_chat, and message.text plus reply_text."""
+    message = SimpleNamespace(
+        text=text, reply_text=AsyncMock(return_value=None)
+    )
+    return SimpleNamespace(
+        effective_user=SimpleNamespace(id=telegram_id),
+        effective_chat=SimpleNamespace(
+            id=chat_id, send_action=AsyncMock(return_value=None)
+        ),
+        message=message,
+    )
+
+
+async def test_use_existing_dispatch_binds_chat(
+    bot: NexusBot, telegram_user_factory
+) -> None:
+    """When the in-flight architect's `use_existing_project_id` is set
+    after a turn, the bot binds the chat to that project instead of
+    persisting a new one."""
+    user_id, tg = await telegram_user_factory(501, "MatchUser")
+    async with session_scope() as session:
+        existing = await repo.create_project(
+            session, user_id=user_id, name="Spanish", domain="language_learning"
+        )
+        existing_id = existing.id
+
+    # Pre-stage a fake architect interview that finishes via the
+    # use-existing path on the next turn.
+    state = bot._state(chat_id=99)
+    fake_interview = SimpleNamespace(
+        turn=AsyncMock(
+            return_value=(
+                "Sounds like your Spanish project. Binding now.",
+                True,
+            )
+        ),
+        proposal=None,
+        use_existing_project_id=str(existing_id),
+    )
+    state.architect = fake_interview
+    state.architect_domain = "language_learning"
+
+    update = _make_update_for_on_text(
+        telegram_id=tg, chat_id=99, text="yes use the existing one"
+    )
+    await bot.on_text(update, context=SimpleNamespace())
+
+    # Two reply_text calls: the architect's chat reply, then the binding confirm.
+    assert update.message.reply_text.await_count >= 2
+    bind_confirm = update.message.reply_text.call_args_list[-1].args[0]
+    assert "Spanish" in bind_confirm
+    assert "bound" in bind_confirm.lower()
+
+    # Architect state cleared, chat bound in DB.
+    assert bot._state(99).architect is None
+    async with session_scope() as session:
+        u = await repo.get_user_by_telegram_id(session, tg)
+        assert await repo.get_active_project_for_chat(u, 99) == existing_id
+
+
+async def test_use_existing_with_bogus_uuid_recovers(
+    bot: NexusBot, telegram_user_factory
+) -> None:
+    """If the LLM hands us a use_existing_project_id that isn't a UUID,
+    we tell the user to retry and clear the interview state — no crash."""
+    _, tg = await telegram_user_factory(502, "BadUuid")
+    state = bot._state(chat_id=100)
+    fake_interview = SimpleNamespace(
+        turn=AsyncMock(return_value=("Locking in.", True)),
+        proposal=None,
+        use_existing_project_id="not-a-uuid",
+    )
+    state.architect = fake_interview
+    state.architect_domain = "language_learning"
+
+    update = _make_update_for_on_text(
+        telegram_id=tg, chat_id=100, text="yes do it"
+    )
+    await bot.on_text(update, context=SimpleNamespace())
+
+    last_reply = update.message.reply_text.call_args_list[-1].args[0]
+    assert "invalid project id" in last_reply.lower()
+    assert bot._state(100).architect is None

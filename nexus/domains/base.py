@@ -81,6 +81,16 @@ class ArchitectProposal(BaseModel):
     plans: list[PlanProposal]
 
 
+class UseExistingDecision(BaseModel):
+    """Emitted by the architect when the user confirms continuing an
+    existing project instead of creating a new one (mid-interview
+    semantic-match path)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str  # UUID as string; parsed at the boundary
+
+
 # ---------------------------------------------------------------------------
 # Summarizer output — emitted by the specialist's summarize prompt at session
 # end. Drives `summaries` row creation, plan-item patches, and plan revisions.

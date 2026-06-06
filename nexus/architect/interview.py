@@ -13,18 +13,25 @@ import re
 
 from pydantic import ValidationError
 
-from nexus.architect.prompts import build_architect_prompt
-from nexus.domains.base import ArchitectProposal, DomainConfig
+from nexus.architect.prompts import ExistingProjectStub, build_architect_prompt
+from nexus.domains.base import ArchitectProposal, DomainConfig, UseExistingDecision
 from nexus.domains.registry import load_domain_default
 from nexus.llm import ChatMessage, LLMClient, get_llm_client
 
 _PROPOSAL_RE = re.compile(
     r"<<<PROPOSAL>>>\s*(.*?)\s*<<<END_PROPOSAL>>>", re.DOTALL
 )
+_USE_EXISTING_RE = re.compile(
+    r"<<<USE_EXISTING>>>\s*(.*?)\s*<<<END_USE_EXISTING>>>", re.DOTALL
+)
 
 
 class ProposalParseError(Exception):
     """Raised when a <<<PROPOSAL>>> block exists but isn't valid JSON / schema."""
+
+
+class UseExistingParseError(Exception):
+    """Raised when a <<<USE_EXISTING>>> block exists but isn't valid."""
 
 
 def extract_proposal(text: str) -> ArchitectProposal | None:
@@ -46,6 +53,30 @@ def extract_proposal(text: str) -> ArchitectProposal | None:
         return ArchitectProposal.model_validate(data)
     except ValidationError as exc:
         raise ProposalParseError(f"proposal block failed schema validation: {exc}") from exc
+
+
+def extract_use_existing(text: str) -> UseExistingDecision | None:
+    """Find a `<<<USE_EXISTING>>>...<<<END_USE_EXISTING>>>` block in `text`
+    and return the validated decision. Returns None if no block is present.
+
+    Raises `UseExistingParseError` if a block is present but malformed.
+    """
+    match = _USE_EXISTING_RE.search(text)
+    if match is None:
+        return None
+    raw = match.group(1).strip()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise UseExistingParseError(
+            f"use-existing block is not valid JSON: {exc}"
+        ) from exc
+    try:
+        return UseExistingDecision.model_validate(data)
+    except ValidationError as exc:
+        raise UseExistingParseError(
+            f"use-existing block failed schema validation: {exc}"
+        ) from exc
 
 
 class ArchitectInterview:
@@ -73,21 +104,26 @@ class ArchitectInterview:
         domain: str,
         llm: LLMClient | None = None,
         default_config: DomainConfig | None = None,
-        existing_project_names: list[str] | None = None,
+        existing_projects: list[ExistingProjectStub] | None = None,
     ) -> None:
         self.domain = domain
         self.default_config = default_config or load_domain_default(domain)
         self.system_prompt = build_architect_prompt(
             self.default_config,
-            existing_project_names=existing_project_names,
+            existing_projects=existing_projects,
         )
         self.llm = llm or get_llm_client()
         self.history: list[ChatMessage] = []
         self.proposal: ArchitectProposal | None = None
+        # Set when the architect detects the user wants an existing project.
+        # Mutually exclusive with `proposal`; checked in `done`.
+        self.use_existing_project_id: str | None = None
 
     @property
     def done(self) -> bool:
-        return self.proposal is not None
+        return (
+            self.proposal is not None or self.use_existing_project_id is not None
+        )
 
     async def kick_off(self) -> str:
         """First turn — LLM greets and asks initial questions."""
@@ -120,6 +156,28 @@ class ArchitectInterview:
             )
             self.history.append(reply)
             last_assistant = reply
+
+            # The USE_EXISTING marker wins if both appear; the prompt forbids
+            # emitting both, so this is mainly defensive.
+            try:
+                use_existing = extract_use_existing(reply.content)
+            except UseExistingParseError as exc:
+                if attempt < self.MAX_FIX_ATTEMPTS:
+                    self.history.append(
+                        ChatMessage(
+                            role="user",
+                            content=(
+                                f"The <<<USE_EXISTING>>> block didn't parse: {exc}\n"
+                                "Send it again with corrected JSON."
+                            ),
+                        )
+                    )
+                    continue
+                return reply.content, False
+
+            if use_existing is not None:
+                self.use_existing_project_id = use_existing.project_id
+                return reply.content, True
 
             try:
                 proposal = extract_proposal(reply.content)

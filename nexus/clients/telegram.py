@@ -34,7 +34,11 @@ from telegram.ext import (
     filters,
 )
 
-from nexus.architect import ArchitectInterview, persist_architect_output
+from nexus.architect import (
+    ArchitectInterview,
+    ExistingProjectStub,
+    persist_architect_output,
+)
 from nexus.config import list_available_domains
 from nexus.db import repository as repo
 from nexus.db.engine import session_scope
@@ -336,22 +340,42 @@ class NexusBot:
         # No collision — start the interview directly.
         await self._typing(update)
         opener = await self._start_architect_interview(
-            update.effective_chat.id, domain=domain, existing_names=[]
+            update.effective_chat.id, domain=domain, existing_projects=[]
         )
         await reply_chunked(update.message, opener)
 
     async def _start_architect_interview(
-        self, chat_id: int, *, domain: str, existing_names: list[str]
+        self,
+        chat_id: int,
+        *,
+        domain: str,
+        existing_projects: list[ExistingProjectStub],
     ) -> str:
         """Spin up an in-memory architect interview for the chat and return
         the opener (so the caller can send it via whichever message surface
         it has — a command's update.message or a callback's edit/send)."""
         state = self._state(chat_id)
         state.architect = ArchitectInterview(
-            domain=domain, existing_project_names=existing_names or None
+            domain=domain, existing_projects=existing_projects or None
         )
         state.architect_domain = domain
         return await state.architect.kick_off()
+
+    async def _collect_existing_project_stubs(
+        self, user_id, domain: str
+    ) -> list[ExistingProjectStub]:
+        """Returns ExistingProjectStub for every active same-domain project of
+        the user — used both for the keyboard list and the architect prompt."""
+        async with session_scope() as session:
+            return [
+                ExistingProjectStub(
+                    id=str(p.id),
+                    name=p.name,
+                    profile=(p.config or {}).get("profile", {}),
+                )
+                for p in await repo.list_projects(session, user_id)
+                if p.domain == domain
+            ]
 
     async def cmd_end(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -455,20 +479,17 @@ class NexusBot:
         if chat_id is None:
             return
 
-        # Pull the existing project names in this domain so the architect
-        # prompt can require a distinct new name.
         async with session_scope() as session:
             user = await repo.get_or_create_user_by_telegram_id(
                 session, telegram_id=query.from_user.id
             )
-            existing_names = [
-                p.name
-                for p in await repo.list_projects(session, user.id)
-                if p.domain == domain
-            ]
+            user_id = user.id
+        existing_projects = await self._collect_existing_project_stubs(
+            user_id, domain
+        )
 
         opener = await self._start_architect_interview(
-            chat_id, domain=domain, existing_names=existing_names
+            chat_id, domain=domain, existing_projects=existing_projects
         )
         # Replace the keyboard message with the architect's opener so the
         # buttons disappear and the user just sees the next question.
@@ -497,39 +518,93 @@ class NexusBot:
             await self._typing(update)
             reply, done = await state.architect.turn(text)
             await reply_chunked(update.message, reply)
-            if done and state.architect.proposal is not None:
-                proposal = state.architect.proposal
-                domain = state.architect_domain or proposal.config.domain
-                async with session_scope() as session:
-                    user = await repo.get_or_create_user_by_telegram_id(
-                        session, telegram_id=update.effective_user.id
+            if done:
+                # Architect produced one of two outcomes: bind to an existing
+                # project, or create a new one. The two cases are mutually
+                # exclusive (the prompt forbids emitting both markers).
+                if state.architect.use_existing_project_id is not None:
+                    await self._finalize_use_existing(
+                        update, chat_id, state.architect.use_existing_project_id
                     )
-                    project, plans = await persist_architect_output(
-                        session,
-                        user_id=user.id,
-                        domain=domain,
-                        proposal=proposal,
-                    )
-                    await repo.set_active_project_for_chat(
-                        session,
-                        user=user,
-                        chat_id=chat_id,
-                        project_id=project.id,
+                elif state.architect.proposal is not None:
+                    await self._finalize_new_project(
+                        update, chat_id, state.architect, state.architect_domain
                     )
                 state.architect = None
                 state.architect_domain = None
-                plan_lines = [
-                    f"  • [{p.horizon}] {p.name} ({len(p.items)} items)"
-                    for p in plans
-                ]
-                await reply_chunked(update.message, 
-                    "Saved.\n"
-                    f"Project: {project.name}\n"
-                    f"Plans:\n" + "\n".join(plan_lines) + "\n\n"
-                    "This chat is now bound to your new project. "
-                    "Say hi to start your first lesson."
-                )
             return
+
+    async def _finalize_use_existing(
+        self, update: Update, chat_id: int, raw_project_id: str
+    ) -> None:
+        """Bind the chat to the existing project the architect identified."""
+        try:
+            project_uuid = uuid.UUID(raw_project_id)
+        except ValueError:
+            await reply_chunked(
+                update.message,
+                "The architect picked an invalid project id — please /architect again.",
+            )
+            return
+        async with session_scope() as session:
+            user = await repo.get_or_create_user_by_telegram_id(
+                session, telegram_id=update.effective_user.id
+            )
+            project = await repo.get_project(session, project_uuid)
+            # Auth: must belong to this user (defensive; architect was given
+            # only this user's projects).
+            if project is None or project.user_id != user.id:
+                await reply_chunked(
+                    update.message,
+                    "That project isn't available anymore — try /architect again.",
+                )
+                return
+            await repo.set_active_project_for_chat(
+                session, user=user, chat_id=chat_id, project_id=project.id
+            )
+        await reply_chunked(
+            update.message,
+            f"Continuing with '{project.name}'. This chat is now bound to it.",
+        )
+
+    async def _finalize_new_project(
+        self,
+        update: Update,
+        chat_id: int,
+        interview: ArchitectInterview,
+        domain: str | None,
+    ) -> None:
+        """Persist the architect proposal as a brand-new project."""
+        proposal = interview.proposal
+        assert proposal is not None  # caller guards
+        domain = domain or proposal.config.domain
+        async with session_scope() as session:
+            user = await repo.get_or_create_user_by_telegram_id(
+                session, telegram_id=update.effective_user.id
+            )
+            project, plans = await persist_architect_output(
+                session,
+                user_id=user.id,
+                domain=domain,
+                proposal=proposal,
+            )
+            await repo.set_active_project_for_chat(
+                session,
+                user=user,
+                chat_id=chat_id,
+                project_id=project.id,
+            )
+        plan_lines = [
+            f"  • [{p.horizon}] {p.name} ({len(p.items)} items)" for p in plans
+        ]
+        await reply_chunked(
+            update.message,
+            "Saved.\n"
+            f"Project: {project.name}\n"
+            f"Plans:\n" + "\n".join(plan_lines) + "\n\n"
+            "This chat is now bound to your new project. "
+            "Say hi to start your first lesson.",
+        )
 
         # 2) Specialist chat.
         async with session_scope() as session:

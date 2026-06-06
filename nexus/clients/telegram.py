@@ -520,10 +520,11 @@ class NexusBot:
         text = update.message.text
 
         logger.info(
-            "on_text: chat=%s tg_user=%s text=%r",
+            "on_text: chat=%s tg_user=%s text=%r architect_in_flight=%s",
             chat_id,
             update.effective_user.id,
             (text[:80] + "…") if len(text) > 80 else text,
+            state.architect is not None,
         )
 
         # 1) Architect mode (if a /architect interview is in flight).
@@ -620,17 +621,31 @@ class NexusBot:
         )
 
         # 2) Specialist chat.
+        logger.info("on_text: entering specialist branch, opening session_scope")
         async with session_scope() as session:
+            logger.info("on_text: session_scope open, loading user")
             user = await repo.get_or_create_user_by_telegram_id(
                 session, telegram_id=update.effective_user.id
             )
+            logger.info(
+                "on_text: user loaded id=%s settings_keys=%s",
+                user.id,
+                sorted((user.settings or {}).keys()),
+            )
             project_id = await repo.get_active_project_for_chat(user, chat_id)
+            logger.info(
+                "on_text: get_active_project_for_chat(%s) -> %s",
+                chat_id,
+                project_id,
+            )
             if project_id is None:
+                logger.info("on_text: not bound — sending nudge")
                 await reply_chunked(
                     update.message,
                     "This chat isn't bound to a project yet. "
                     "Use /projects then /use <name>, or /architect <domain>.",
                 )
+                logger.info("on_text: nudge sent, returning")
                 return
             logger.info(
                 "specialist.handle_message start: chat=%s project=%s",

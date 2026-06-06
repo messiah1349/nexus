@@ -51,6 +51,52 @@ SWEEP_INTERVAL_SECONDS = 60
 # Format: ``use_project:<uuid>`` — 48 bytes, well under Telegram's 64-byte cap.
 CALLBACK_USE_PROJECT_PREFIX = "use_project:"
 
+# Telegram's hard cap on a single text message. Anything longer must be
+# split into multiple `send_message` calls.
+MAX_TELEGRAM_MESSAGE_LEN = 4096
+
+
+def chunk_for_telegram(
+    text: str, *, max_len: int = MAX_TELEGRAM_MESSAGE_LEN
+) -> list[str]:
+    """Split `text` into chunks that fit Telegram's per-message limit.
+
+    Prefers, in order: paragraph break (``\\n\\n``) → line break (``\\n``)
+    → sentence boundary (``. ``) → word boundary (``" "``) → hard cut.
+    Empty input returns an empty list. Each emitted chunk has its leading
+    and trailing whitespace trimmed.
+    """
+    if not text:
+        return []
+    chunks: list[str] = []
+    remaining = text
+    while remaining:
+        if len(remaining) <= max_len:
+            chunks.append(remaining.strip())
+            break
+        window = remaining[:max_len]
+        split_at: int | None = None
+        for sep in ("\n\n", "\n", ". ", " "):
+            idx = window.rfind(sep)
+            if idx > 0:
+                split_at = idx + len(sep)
+                break
+        if split_at is None:
+            split_at = max_len
+        chunks.append(remaining[:split_at].strip())
+        remaining = remaining[split_at:]
+    return [c for c in chunks if c]
+
+
+async def reply_chunked(message, text: str) -> None:
+    """Send ``text`` as one or more Telegram messages, splitting if needed.
+
+    ``message`` is a ``telegram.Message`` (typed loosely so unit tests can
+    pass a stub).
+    """
+    for chunk in chunk_for_telegram(text):
+        await message.reply_text(chunk)
+
 
 @dataclass
 class _ChatState:
@@ -127,7 +173,7 @@ class NexusBot:
                 telegram_id=tg.id,
                 display_name=(tg.full_name or tg.username or None),
             )
-        await update.message.reply_text(
+        await reply_chunked(update.message, 
             "Welcome to Nexus.\n\n"
             "Next steps:\n"
             "  /architect <domain> — set up your first project\n"
@@ -149,7 +195,7 @@ class NexusBot:
             )
             projects = await repo.list_projects(session, user.id)
         if not projects:
-            await update.message.reply_text(
+            await reply_chunked(update.message, 
                 "No projects yet. Run /architect <domain> to create one."
             )
             return
@@ -166,6 +212,8 @@ class NexusBot:
             ]
             for p in projects
         ]
+        # Keyboard message stays on the direct reply_text path — short text,
+        # and reply_chunked doesn't pass keyword args through.
         await update.message.reply_text(
             "Tap a project to bind this chat:",
             reply_markup=InlineKeyboardMarkup(keyboard),
@@ -181,7 +229,7 @@ class NexusBot:
         ):
             return
         if not context.args:
-            await update.message.reply_text("Usage: /use <project-name>")
+            await reply_chunked(update.message, "Usage: /use <project-name>")
             return
         target_name = " ".join(context.args).strip().lower()
         async with session_scope() as session:
@@ -196,12 +244,12 @@ class NexusBot:
                     p for p in projects if p.name.lower().startswith(target_name)
                 ]
             if not matches:
-                await update.message.reply_text(
+                await reply_chunked(update.message, 
                     f"No project matched '{' '.join(context.args)}'. /projects to list."
                 )
                 return
             if len(matches) > 1:
-                await update.message.reply_text(
+                await reply_chunked(update.message, 
                     "Ambiguous — multiple projects match. Use the full name."
                 )
                 return
@@ -212,7 +260,7 @@ class NexusBot:
                 chat_id=update.effective_chat.id,
                 project_id=project.id,
             )
-        await update.message.reply_text(f"This chat is now bound to '{project.name}'.")
+        await reply_chunked(update.message, f"This chat is now bound to '{project.name}'.")
 
     async def cmd_architect(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -224,14 +272,14 @@ class NexusBot:
         ):
             return
         if not context.args:
-            await update.message.reply_text(
+            await reply_chunked(update.message, 
                 "Usage: /architect <domain>. Available: "
                 f"{', '.join(list_available_domains())}"
             )
             return
         domain = context.args[0]
         if domain not in list_available_domains():
-            await update.message.reply_text(
+            await reply_chunked(update.message, 
                 f"Unknown domain '{domain}'. Available: "
                 f"{', '.join(list_available_domains())}"
             )
@@ -244,7 +292,7 @@ class NexusBot:
         state.architect_domain = domain
         await self._typing(update)
         opener = await state.architect.kick_off()
-        await update.message.reply_text(opener)
+        await reply_chunked(update.message, opener)
 
     async def cmd_end(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -263,19 +311,19 @@ class NexusBot:
                 user, update.effective_chat.id
             )
             if project_id is None:
-                await update.message.reply_text(
+                await reply_chunked(update.message, 
                     "No active project for this chat. Use /use <name> first."
                 )
                 return
             active = await repo.get_active_session(session, project_id)
             if active is None:
-                await update.message.reply_text("No active session — nothing to end.")
+                await reply_chunked(update.message, "No active session — nothing to end.")
                 return
             await self._typing(update)
             summary = await end_session_with_summary(
                 session, session_id=active.id, reason="explicit"
             )
-        await update.message.reply_text(
+        await reply_chunked(update.message, 
             f"Session closed.\n\nSummary:\n{summary.content}"
         )
 
@@ -352,7 +400,7 @@ class NexusBot:
         if state.architect is not None:
             await self._typing(update)
             reply, done = await state.architect.turn(text)
-            await update.message.reply_text(reply)
+            await reply_chunked(update.message, reply)
             if done and state.architect.proposal is not None:
                 proposal = state.architect.proposal
                 domain = state.architect_domain or proposal.config.domain
@@ -378,7 +426,7 @@ class NexusBot:
                     f"  • [{p.horizon}] {p.name} ({len(p.items)} items)"
                     for p in plans
                 ]
-                await update.message.reply_text(
+                await reply_chunked(update.message, 
                     "Saved.\n"
                     f"Project: {project.name}\n"
                     f"Plans:\n" + "\n".join(plan_lines) + "\n\n"
@@ -394,7 +442,7 @@ class NexusBot:
             )
             project_id = await repo.get_active_project_for_chat(user, chat_id)
             if project_id is None:
-                await update.message.reply_text(
+                await reply_chunked(update.message, 
                     "This chat isn't bound to a project yet. "
                     "Use /projects then /use <name>, or /architect <domain>."
                 )
@@ -402,7 +450,7 @@ class NexusBot:
             await self._typing(update)
             agent = SpecialistAgent(project_id=project_id)
             reply, _ = await agent.handle_message(session, text)
-        await update.message.reply_text(reply)
+        await reply_chunked(update.message, reply)
 
     # ------------------------------------------------------------------
     # Background sweeper

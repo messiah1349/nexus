@@ -145,6 +145,12 @@ class NexusBot:
             MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_text)
         )
 
+        # Top-level error handler — without this, exceptions raised inside a
+        # handler get logged by PTB's internal logger at WARNING, which is
+        # easy to miss if root logging is unconfigured. Surface every
+        # exception explicitly so silent hangs are diagnosable.
+        self.app.add_error_handler(self._on_error)
+
         # Background sweeper for idle-timeout sessions. PTB's JobQueue runs
         # this on the same event loop as the bot.
         if self.app.job_queue is not None:
@@ -513,6 +519,13 @@ class NexusBot:
         state = self._state(chat_id)
         text = update.message.text
 
+        logger.info(
+            "on_text: chat=%s tg_user=%s text=%r",
+            chat_id,
+            update.effective_user.id,
+            (text[:80] + "…") if len(text) > 80 else text,
+        )
+
         # 1) Architect mode (if a /architect interview is in flight).
         if state.architect is not None:
             await self._typing(update)
@@ -613,15 +626,41 @@ class NexusBot:
             )
             project_id = await repo.get_active_project_for_chat(user, chat_id)
             if project_id is None:
-                await reply_chunked(update.message, 
+                await reply_chunked(
+                    update.message,
                     "This chat isn't bound to a project yet. "
-                    "Use /projects then /use <name>, or /architect <domain>."
+                    "Use /projects then /use <name>, or /architect <domain>.",
                 )
                 return
+            logger.info(
+                "specialist.handle_message start: chat=%s project=%s",
+                chat_id,
+                project_id,
+            )
             await self._typing(update)
             agent = SpecialistAgent(project_id=project_id)
             reply, _ = await agent.handle_message(session, text)
+        logger.info(
+            "specialist.handle_message done: chat=%s reply_len=%d",
+            chat_id,
+            len(reply or ""),
+        )
         await reply_chunked(update.message, reply)
+
+    # ------------------------------------------------------------------
+    # Error visibility — without this, unhandled handler exceptions log at
+    # WARNING through PTB's own logger and are easy to miss when root logging
+    # isn't configured.
+
+    async def _on_error(
+        self, update: object, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        chat_hint = ""
+        if isinstance(update, Update) and update.effective_chat is not None:
+            chat_hint = f" chat={update.effective_chat.id}"
+        logger.exception(
+            "unhandled exception in handler%s: %s", chat_hint, context.error
+        )
 
     # ------------------------------------------------------------------
     # Background sweeper

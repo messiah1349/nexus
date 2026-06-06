@@ -7,10 +7,15 @@ cuts cost and latency materially after the first turn.
 
 from __future__ import annotations
 
+import logging
+import time
+
 from anthropic import AsyncAnthropic
 
 from nexus.settings import get_settings
 from nexus.llm.base import ChatMessage, LLMClient
+
+logger = logging.getLogger(__name__)
 
 
 class AnthropicClient(LLMClient):
@@ -48,11 +53,30 @@ class AnthropicClient(LLMClient):
                 }
             ]
 
-        response = await self._client.messages.create(
-            model=model or self._default_model,
-            max_tokens=max_tokens,
-            system=system_param if system_param is not None else [],
-            messages=anthropic_messages,
+        m = model or self._default_model
+        logger.info(
+            "anthropic.chat start: model=%s n_messages=%d system_len=%d",
+            m,
+            len(anthropic_messages),
+            len(system) if system else 0,
+        )
+        t0 = time.monotonic()
+        try:
+            response = await self._client.messages.create(
+                model=m,
+                max_tokens=max_tokens,
+                system=system_param if system_param is not None else [],
+                messages=anthropic_messages,
+            )
+        except Exception:
+            logger.exception(
+                "anthropic.chat failed: model=%s elapsed=%.1fs",
+                m,
+                time.monotonic() - t0,
+            )
+            raise
+        logger.info(
+            "anthropic.chat done: model=%s elapsed=%.1fs", m, time.monotonic() - t0
         )
 
         # Plain-text response — content is a list of blocks; in our usage there

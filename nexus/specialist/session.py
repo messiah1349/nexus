@@ -13,6 +13,7 @@ each user turn. It:
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +22,8 @@ from nexus.db import repository as repo
 from nexus.db.models import Session
 from nexus.domains.base import DomainConfig
 from nexus.llm import LLMClient
+
+logger = logging.getLogger(__name__)
 
 
 class SessionLifecycleError(Exception):
@@ -60,12 +63,25 @@ async def open_or_resume_session(
             db, sess=active, idle_timeout_minutes=config.sessions.idle_timeout_minutes
         )
         if not stale:
+            logger.info(
+                "open_or_resume_session: resuming fresh session=%s project=%s",
+                active.id,
+                project_id,
+            )
             return active
 
         # Stale — end + summarize the previous session before opening a new one.
         from nexus.specialist.summarizer import end_session_with_summary
 
+        logger.info(
+            "open_or_resume_session: previous session=%s is stale, "
+            "running end_session_with_summary (this will call the LLM)",
+            active.id,
+        )
         await end_session_with_summary(db, session_id=active.id, reason="timeout", llm=llm)
+        logger.info(
+            "open_or_resume_session: summarizer done for session=%s", active.id
+        )
 
     # Pick a plan to attach the new session to. Prefer the most recent
     # weekly; fall back to whichever active plan exists; fall back to None.
@@ -76,4 +92,11 @@ async def open_or_resume_session(
         chosen = weekly[-1] if weekly else plans[-1]
         plan_id = chosen.id
 
-    return await repo.create_session(db, project_id=project_id, plan_id=plan_id)
+    new_sess = await repo.create_session(db, project_id=project_id, plan_id=plan_id)
+    logger.info(
+        "open_or_resume_session: created session=%s project=%s plan_id=%s",
+        new_sess.id,
+        project_id,
+        plan_id,
+    )
+    return new_sess

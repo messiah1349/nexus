@@ -14,11 +14,16 @@ Translation notes vs Anthropic:
 
 from __future__ import annotations
 
+import logging
+import time
+
 from google import genai
 from google.genai import types as gtypes
 
 from nexus.llm.base import ChatMessage, LLMClient
 from nexus.settings import get_settings
+
+logger = logging.getLogger(__name__)
 
 
 def _to_gemini_role(role: str) -> str:
@@ -60,10 +65,29 @@ class GeminiClient(LLMClient):
             max_output_tokens=max_tokens,
         )
 
-        response = await self._client.aio.models.generate_content(
-            model=model or self._default_model,
-            contents=contents,
-            config=config,
+        m = model or self._default_model
+        logger.info(
+            "gemini.chat start: model=%s n_contents=%d system_len=%d",
+            m,
+            len(contents),
+            len(system) if system else 0,
+        )
+        t0 = time.monotonic()
+        try:
+            response = await self._client.aio.models.generate_content(
+                model=m,
+                contents=contents,
+                config=config,
+            )
+        except Exception:
+            logger.exception(
+                "gemini.chat failed: model=%s elapsed=%.1fs",
+                m,
+                time.monotonic() - t0,
+            )
+            raise
+        logger.info(
+            "gemini.chat done: model=%s elapsed=%.1fs", m, time.monotonic() - t0
         )
 
         # `response.text` is the SDK's convenience accessor for the joined

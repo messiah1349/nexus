@@ -240,13 +240,33 @@ def chat(
 
 
 @app.command("bot")
-def bot_run() -> None:
+def bot_run(
+    log_level: str = typer.Option(
+        "INFO",
+        "--log-level",
+        help="Root log level (DEBUG, INFO, WARNING, ERROR). "
+        "Set to DEBUG to see per-LLM-call timing.",
+    ),
+) -> None:
     """Start the Telegram bot (with in-process idle-timeout sweeper).
 
     Requires TELEGRAM_BOT_TOKEN in env / .env / ~/.zshrc. Blocks until
     interrupted (Ctrl-C).
     """
+    import logging
+
     from nexus.clients.telegram import NexusBot
+
+    logging.basicConfig(
+        level=getattr(logging, log_level.upper()),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    # PTB's own httpx + asyncio loggers are noisy at DEBUG; clamp them to INFO
+    # even when the user asks for DEBUG, so nexus logs stay visible.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("telegram.ext").setLevel(logging.INFO)
 
     NexusBot().run()
 

@@ -548,6 +548,48 @@ class NexusBot:
                 state.architect_domain = None
             return
 
+        # 2) Specialist chat.
+        logger.info("on_text: entering specialist branch, opening session_scope")
+        async with session_scope() as session:
+            logger.info("on_text: session_scope open, loading user")
+            user = await repo.get_or_create_user_by_telegram_id(
+                session, telegram_id=update.effective_user.id
+            )
+            logger.info(
+                "on_text: user loaded id=%s settings_keys=%s",
+                user.id,
+                sorted((user.settings or {}).keys()),
+            )
+            project_id = await repo.get_active_project_for_chat(user, chat_id)
+            logger.info(
+                "on_text: get_active_project_for_chat(%s) -> %s",
+                chat_id,
+                project_id,
+            )
+            if project_id is None:
+                logger.info("on_text: not bound — sending nudge")
+                await reply_chunked(
+                    update.message,
+                    "This chat isn't bound to a project yet. "
+                    "Use /projects then /use <name>, or /architect <domain>.",
+                )
+                logger.info("on_text: nudge sent, returning")
+                return
+            logger.info(
+                "specialist.handle_message start: chat=%s project=%s",
+                chat_id,
+                project_id,
+            )
+            await self._typing(update)
+            agent = SpecialistAgent(project_id=project_id)
+            reply, _ = await agent.handle_message(session, text)
+        logger.info(
+            "specialist.handle_message done: chat=%s reply_len=%d",
+            chat_id,
+            len(reply or ""),
+        )
+        await reply_chunked(update.message, reply)
+
     async def _finalize_use_existing(
         self, update: Update, chat_id: int, raw_project_id: str
     ) -> None:
@@ -619,48 +661,6 @@ class NexusBot:
             "This chat is now bound to your new project. "
             "Say hi to start your first lesson.",
         )
-
-        # 2) Specialist chat.
-        logger.info("on_text: entering specialist branch, opening session_scope")
-        async with session_scope() as session:
-            logger.info("on_text: session_scope open, loading user")
-            user = await repo.get_or_create_user_by_telegram_id(
-                session, telegram_id=update.effective_user.id
-            )
-            logger.info(
-                "on_text: user loaded id=%s settings_keys=%s",
-                user.id,
-                sorted((user.settings or {}).keys()),
-            )
-            project_id = await repo.get_active_project_for_chat(user, chat_id)
-            logger.info(
-                "on_text: get_active_project_for_chat(%s) -> %s",
-                chat_id,
-                project_id,
-            )
-            if project_id is None:
-                logger.info("on_text: not bound — sending nudge")
-                await reply_chunked(
-                    update.message,
-                    "This chat isn't bound to a project yet. "
-                    "Use /projects then /use <name>, or /architect <domain>.",
-                )
-                logger.info("on_text: nudge sent, returning")
-                return
-            logger.info(
-                "specialist.handle_message start: chat=%s project=%s",
-                chat_id,
-                project_id,
-            )
-            await self._typing(update)
-            agent = SpecialistAgent(project_id=project_id)
-            reply, _ = await agent.handle_message(session, text)
-        logger.info(
-            "specialist.handle_message done: chat=%s reply_len=%d",
-            chat_id,
-            len(reply or ""),
-        )
-        await reply_chunked(update.message, reply)
 
     # ------------------------------------------------------------------
     # Error visibility — without this, unhandled handler exceptions log at

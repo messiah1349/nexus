@@ -3,8 +3,7 @@
 Commands:
   /start                  — register / greet
   /projects               — list this user's projects
-  /use <name>             — bind this chat to a project (by name, case-insensitive)
-  /architect <domain>     — start an architect interview in this chat
+  /use <name>             — bind this chat to a project (by name, case-insensitive) /architect <domain>     — start an architect interview in this chat
   /end                    — end the current session and summarize
   default text            — forwarded to SpecialistAgent.handle_message
 
@@ -15,20 +14,17 @@ in-flight interviews; the user just re-runs /architect. Acceptable for MVP.
 from __future__ import annotations
 
 import logging
-import re
 import uuid
 from dataclasses import dataclass
 
 from sqlalchemy import desc as sa_desc
 from sqlalchemy import select
 from telegram import (
-    BotCommand,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Update,
 )
-from telegram.constants import ChatAction, ParseMode
-from telegram.error import BadRequest
+from telegram.constants import ChatAction
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -51,104 +47,9 @@ logger = logging.getLogger(__name__)
 
 SWEEP_INTERVAL_SECONDS = 60
 
-# Prefix on InlineKeyboardButton.callback_data for "bind this chat to a project".
-# Format: ``use_project:<uuid>``. Telegram caps callback_data at 64 bytes;
-# `use_project:` (12) + UUID string (36) = 48, well within.
+# InlineKeyboardButton callback_data prefix for "bind this chat to a project".
+# Format: ``use_project:<uuid>`` — 48 bytes, well under Telegram's 64-byte cap.
 CALLBACK_USE_PROJECT_PREFIX = "use_project:"
-
-# Telegram's hard cap on a single text message. Anything longer must be
-# split into multiple `send_message` calls.
-MAX_TELEGRAM_MESSAGE_LEN = 4096
-
-
-def chunk_for_telegram(
-    text: str, *, max_len: int = MAX_TELEGRAM_MESSAGE_LEN
-) -> list[str]:
-    """Split `text` into chunks that fit Telegram's per-message limit.
-
-    Prefers, in order: paragraph break (``\\n\\n``) → line break (``\\n``)
-    → sentence boundary (``. ``) → word boundary (``" "``) → hard cut.
-    Empty input returns an empty list. Each emitted chunk has its leading
-    and trailing whitespace trimmed.
-    """
-    if not text:
-        return []
-    chunks: list[str] = []
-    remaining = text
-    while remaining:
-        if len(remaining) <= max_len:
-            chunks.append(remaining.strip())
-            break
-        window = remaining[:max_len]
-        split_at: int | None = None
-        for sep in ("\n\n", "\n", ". ", " "):
-            idx = window.rfind(sep)
-            if idx > 0:
-                split_at = idx + len(sep)
-                break
-        if split_at is None:
-            # No safe boundary in window — hard cut at max_len.
-            split_at = max_len
-        chunks.append(remaining[:split_at].strip())
-        remaining = remaining[split_at:]
-    return [c for c in chunks if c]
-
-
-def escape_markdown_v2(input_text: str) -> str:
-    """Convert LLM-style Markdown into Telegram MarkdownV2.
-
-    Same shape as the impl in
-    https://github.com/messiah1349/telegram_agent_caller/blob/main/bot/common/utils.py:
-
-      - ``# Heading``, ``## Heading`` → ``*_Heading_*`` (bold-italic) + blank line
-      - Strip any remaining ``#``
-      - ``**bold**`` → ``*bold*`` (MarkdownV2 uses single ``*``)
-      - Literal ``\\n`` → real newline
-      - Escape MarkdownV2 special chars that are NOT used here for formatting:
-        ``[ ] ( ) ~ > ! . + - = | { } _``
-        (``*`` and `````` are preserved as formatting characters.)
-    """
-    header_pattern = r"[#]+\s+(.+?)\s*\n"
-    header_replacement = r"*_\1_*\n\n"
-    input_text = re.sub(header_pattern, header_replacement, input_text)
-    out = input_text.replace("#", "")
-    out = out.replace("**", "*")
-    out = out.replace("\\n", "\n")
-    for symb in "[]()~>!.+-=|{}_":
-        out = out.replace(symb, f"\\{symb}")
-    return out
-
-
-def _strip_markdown_formatting(text: str) -> str:
-    """Plain-text fallback when Telegram rejects our MarkdownV2.
-
-    Drops the formatting markers (``*``, ``_``, `````) so the user sees
-    readable prose even if it's stylistically dull.
-    """
-    return text.replace("*", "").replace("_", "").replace("`", "")
-
-
-async def reply_chunked(message, text: str) -> None:
-    """Send ``text`` as one or more Telegram messages, splitting if needed and
-    rendering each chunk as MarkdownV2.
-
-    Each chunk is escaped via :func:`escape_markdown_v2` and sent with
-    ``parse_mode=MarkdownV2``. If Telegram rejects the chunk with
-    ``Can't parse entities``, fall back to plain text on that chunk only —
-    other chunks proceed independently. The chunker runs first so that
-    splits land on natural boundaries; the per-chunk fallback keeps one
-    bad LLM response from breaking the rest of the reply.
-    """
-    for chunk in chunk_for_telegram(text):
-        escaped = escape_markdown_v2(chunk)
-        try:
-            await message.reply_text(escaped, parse_mode=ParseMode.MARKDOWN_V2)
-        except BadRequest as exc:
-            if "Can't parse entities" in str(exc):
-                logger.warning("MarkdownV2 parse failed; sending as plain text")
-                await message.reply_text(_strip_markdown_formatting(escaped))
-            else:
-                raise
 
 
 @dataclass
@@ -159,24 +60,6 @@ class _ChatState:
     architect_domain: str | None = None
 
 
-BOT_COMMANDS: list[BotCommand] = [
-    BotCommand("start", "Register or greet"),
-    BotCommand("projects", "List your projects"),
-    BotCommand("use", "Bind this chat to a project — /use <name>"),
-    BotCommand("architect", "Start an architect interview — /architect <domain>"),
-    BotCommand("end", "End the current session and summarize it"),
-]
-
-
-async def _post_init(application: Application) -> None:
-    """Push the canonical command list to Telegram on startup.
-
-    Replaces whatever was last set (via BotFather or a previous run) so the
-    ``/`` autocomplete in clients matches the bot's actual handlers.
-    """
-    await application.bot.set_my_commands(BOT_COMMANDS)
-
-
 class NexusBot:
     def __init__(self, token: str | None = None) -> None:
         settings = get_settings()
@@ -185,12 +68,7 @@ class NexusBot:
             raise ValueError(
                 "TELEGRAM_BOT_TOKEN is not set — add it to .env or pass token="
             )
-        self.app: Application = (
-            Application.builder()
-            .token(resolved_token)
-            .post_init(_post_init)
-            .build()
-        )
+        self.app: Application = Application.builder().token(resolved_token).build()
         self._chat_state: dict[int, _ChatState] = {}
         self._register_handlers()
 
@@ -204,7 +82,9 @@ class NexusBot:
         self.app.add_handler(CommandHandler("architect", self.cmd_architect))
         self.app.add_handler(CommandHandler("end", self.cmd_end))
         self.app.add_handler(
-            CallbackQueryHandler(self.on_callback_query, pattern=f"^{CALLBACK_USE_PROJECT_PREFIX}")
+            CallbackQueryHandler(
+                self.on_callback_query, pattern=f"^{CALLBACK_USE_PROJECT_PREFIX}"
+            )
         )
         self.app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_text)
@@ -247,7 +127,7 @@ class NexusBot:
                 telegram_id=tg.id,
                 display_name=(tg.full_name or tg.username or None),
             )
-        await reply_chunked(update.message, 
+        await update.message.reply_text(
             "Welcome to Nexus.\n\n"
             "Next steps:\n"
             "  /architect <domain> — set up your first project\n"
@@ -269,15 +149,18 @@ class NexusBot:
             )
             projects = await repo.list_projects(session, user.id)
         if not projects:
-            await reply_chunked(
-                update.message,
-                "No projects yet. Run /architect <domain> to create one.",
+            await update.message.reply_text(
+                "No projects yet. Run /architect <domain> to create one."
             )
             return
+        # Button text is the project name only — Telegram truncates labels
+        # past ~20 characters depending on font/locale, so any additional
+        # suffix (e.g. domain in brackets) gets cut off mid-name. The
+        # architect prompt caps project_name length at 25 chars to fit.
         keyboard = [
             [
                 InlineKeyboardButton(
-                    f"{p.name} [{p.domain}]",
+                    p.name,
                     callback_data=f"{CALLBACK_USE_PROJECT_PREFIX}{p.id}",
                 )
             ]
@@ -298,7 +181,7 @@ class NexusBot:
         ):
             return
         if not context.args:
-            await reply_chunked(update.message, "Usage: /use <project-name>")
+            await update.message.reply_text("Usage: /use <project-name>")
             return
         target_name = " ".join(context.args).strip().lower()
         async with session_scope() as session:
@@ -313,12 +196,12 @@ class NexusBot:
                     p for p in projects if p.name.lower().startswith(target_name)
                 ]
             if not matches:
-                await reply_chunked(update.message, 
+                await update.message.reply_text(
                     f"No project matched '{' '.join(context.args)}'. /projects to list."
                 )
                 return
             if len(matches) > 1:
-                await reply_chunked(update.message, 
+                await update.message.reply_text(
                     "Ambiguous — multiple projects match. Use the full name."
                 )
                 return
@@ -329,7 +212,7 @@ class NexusBot:
                 chat_id=update.effective_chat.id,
                 project_id=project.id,
             )
-        await reply_chunked(update.message, f"This chat is now bound to '{project.name}'.")
+        await update.message.reply_text(f"This chat is now bound to '{project.name}'.")
 
     async def cmd_architect(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -341,14 +224,14 @@ class NexusBot:
         ):
             return
         if not context.args:
-            await reply_chunked(update.message, 
+            await update.message.reply_text(
                 "Usage: /architect <domain>. Available: "
                 f"{', '.join(list_available_domains())}"
             )
             return
         domain = context.args[0]
         if domain not in list_available_domains():
-            await reply_chunked(update.message, 
+            await update.message.reply_text(
                 f"Unknown domain '{domain}'. Available: "
                 f"{', '.join(list_available_domains())}"
             )
@@ -361,7 +244,7 @@ class NexusBot:
         state.architect_domain = domain
         await self._typing(update)
         opener = await state.architect.kick_off()
-        await reply_chunked(update.message, opener)
+        await update.message.reply_text(opener)
 
     async def cmd_end(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -380,19 +263,19 @@ class NexusBot:
                 user, update.effective_chat.id
             )
             if project_id is None:
-                await reply_chunked(update.message, 
+                await update.message.reply_text(
                     "No active project for this chat. Use /use <name> first."
                 )
                 return
             active = await repo.get_active_session(session, project_id)
             if active is None:
-                await reply_chunked(update.message, "No active session — nothing to end.")
+                await update.message.reply_text("No active session — nothing to end.")
                 return
             await self._typing(update)
             summary = await end_session_with_summary(
                 session, session_id=active.id, reason="explicit"
             )
-        await reply_chunked(update.message, 
+        await update.message.reply_text(
             f"Session closed.\n\nSummary:\n{summary.content}"
         )
 
@@ -407,11 +290,11 @@ class NexusBot:
             return
 
         # Always answer first so Telegram dismisses the user's loading spinner,
-        # even if we then bail on a validation error below.
+        # even if we then bail on a validation error.
         await query.answer()
 
         if not query.data.startswith(CALLBACK_USE_PROJECT_PREFIX):
-            return  # not our prefix; another handler can own it
+            return
         raw_id = query.data[len(CALLBACK_USE_PROJECT_PREFIX):]
         try:
             project_uuid = uuid.UUID(raw_id)
@@ -426,8 +309,8 @@ class NexusBot:
                 session, telegram_id=query.from_user.id
             )
             project = await repo.get_project(session, project_uuid)
-            # Auth check: the tapper must own the project. Prevents another user
-            # tapping a forwarded button (or a stale message).
+            # Auth: the tapper must own the project. Prevents a stale or
+            # forwarded button from binding someone else's project.
             if project is None or project.user_id != user.id:
                 if query.message is not None:
                     await query.edit_message_text(
@@ -435,7 +318,7 @@ class NexusBot:
                     )
                 return
             if chat_id is None:
-                return  # no chat context to bind to
+                return
             await repo.set_active_project_for_chat(
                 session,
                 user=user,
@@ -469,7 +352,7 @@ class NexusBot:
         if state.architect is not None:
             await self._typing(update)
             reply, done = await state.architect.turn(text)
-            await reply_chunked(update.message, reply)
+            await update.message.reply_text(reply)
             if done and state.architect.proposal is not None:
                 proposal = state.architect.proposal
                 domain = state.architect_domain or proposal.config.domain
@@ -495,7 +378,7 @@ class NexusBot:
                     f"  • [{p.horizon}] {p.name} ({len(p.items)} items)"
                     for p in plans
                 ]
-                await reply_chunked(update.message, 
+                await update.message.reply_text(
                     "Saved.\n"
                     f"Project: {project.name}\n"
                     f"Plans:\n" + "\n".join(plan_lines) + "\n\n"
@@ -511,7 +394,7 @@ class NexusBot:
             )
             project_id = await repo.get_active_project_for_chat(user, chat_id)
             if project_id is None:
-                await reply_chunked(update.message, 
+                await update.message.reply_text(
                     "This chat isn't bound to a project yet. "
                     "Use /projects then /use <name>, or /architect <domain>."
                 )
@@ -519,7 +402,7 @@ class NexusBot:
             await self._typing(update)
             agent = SpecialistAgent(project_id=project_id)
             reply, _ = await agent.handle_message(session, text)
-        await reply_chunked(update.message, reply)
+        await update.message.reply_text(reply)
 
     # ------------------------------------------------------------------
     # Background sweeper

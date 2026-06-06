@@ -111,10 +111,10 @@ async def test_cmd_projects_renders_keyboard_per_project(
     assert len(rows) == 2  # one button per project, each on its own row
     button_texts = {row[0].text for row in rows}
     button_payloads = {row[0].callback_data for row in rows}
-    assert button_texts == {
-        "Spanish [language_learning]",
-        "Strength [fitness]",
-    }
+    # Button label is the project name ONLY (no domain suffix) — Telegram
+    # truncates labels past ~20 chars and the architect prompt caps
+    # project_name at 25, so any suffix would push the label out of view.
+    assert button_texts == {"Spanish", "Strength"}
     assert all(p.startswith(CALLBACK_USE_PROJECT_PREFIX) for p in button_payloads)
     assert {p.removeprefix(CALLBACK_USE_PROJECT_PREFIX) for p in button_payloads} == {
         str(p1_id),

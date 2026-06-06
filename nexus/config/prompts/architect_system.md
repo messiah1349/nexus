@@ -27,7 +27,11 @@ this marker block, on its own lines, with valid JSON inside:
 The JSON between the markers MUST validate against this schema (Pydantic-ish):
 
 ArchitectProposal:
-  project_name: str  (e.g. "Spanish B2", "Strength training")
+  project_name: str — short and label-friendly, MAX 25 characters.
+                It is shown verbatim as the label on a Telegram inline
+                button; anything longer gets truncated mid-name in the
+                client UI. Good: "Spanish B2", "Strength". Bad: "Spanish
+                Intermediate Conversational Course".
   config: DomainConfig  (same shape as the default above; fill in profile from the user's answers)
   plans: list of PlanProposal
 

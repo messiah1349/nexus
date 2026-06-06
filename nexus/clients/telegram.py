@@ -21,11 +21,17 @@ from dataclasses import dataclass
 
 from sqlalchemy import desc as sa_desc
 from sqlalchemy import select
-from telegram import BotCommand, Update
+from telegram import (
+    BotCommand,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+)
 from telegram.constants import ChatAction, ParseMode
 from telegram.error import BadRequest
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -44,6 +50,11 @@ from nexus.workers.timeout import sweep_once
 logger = logging.getLogger(__name__)
 
 SWEEP_INTERVAL_SECONDS = 60
+
+# Prefix on InlineKeyboardButton.callback_data for "bind this chat to a project".
+# Format: ``use_project:<uuid>``. Telegram caps callback_data at 64 bytes;
+# `use_project:` (12) + UUID string (36) = 48, well within.
+CALLBACK_USE_PROJECT_PREFIX = "use_project:"
 
 # Telegram's hard cap on a single text message. Anything longer must be
 # split into multiple `send_message` calls.
@@ -193,6 +204,9 @@ class NexusBot:
         self.app.add_handler(CommandHandler("architect", self.cmd_architect))
         self.app.add_handler(CommandHandler("end", self.cmd_end))
         self.app.add_handler(
+            CallbackQueryHandler(self.on_callback_query, pattern=f"^{CALLBACK_USE_PROJECT_PREFIX}")
+        )
+        self.app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_text)
         )
 
@@ -255,15 +269,24 @@ class NexusBot:
             )
             projects = await repo.list_projects(session, user.id)
         if not projects:
-            await reply_chunked(update.message, 
-                "No projects yet. Run /architect <domain> to create one."
+            await reply_chunked(
+                update.message,
+                "No projects yet. Run /architect <domain> to create one.",
             )
             return
-        lines = ["Your projects:"]
-        for p in projects:
-            lines.append(f"  • {p.name}  [{p.domain}]")
-        lines.append("\nBind this chat with: /use <name>")
-        await reply_chunked(update.message, "\n".join(lines))
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    f"{p.name} [{p.domain}]",
+                    callback_data=f"{CALLBACK_USE_PROJECT_PREFIX}{p.id}",
+                )
+            ]
+            for p in projects
+        ]
+        await update.message.reply_text(
+            "Tap a project to bind this chat:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
 
     async def cmd_use(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -372,6 +395,58 @@ class NexusBot:
         await reply_chunked(update.message, 
             f"Session closed.\n\nSummary:\n{summary.content}"
         )
+
+    # ------------------------------------------------------------------
+    # Inline-keyboard callbacks
+
+    async def on_callback_query(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        query = update.callback_query
+        if query is None or query.data is None or query.from_user is None:
+            return
+
+        # Always answer first so Telegram dismisses the user's loading spinner,
+        # even if we then bail on a validation error below.
+        await query.answer()
+
+        if not query.data.startswith(CALLBACK_USE_PROJECT_PREFIX):
+            return  # not our prefix; another handler can own it
+        raw_id = query.data[len(CALLBACK_USE_PROJECT_PREFIX):]
+        try:
+            project_uuid = uuid.UUID(raw_id)
+        except ValueError:
+            if query.message is not None:
+                await query.edit_message_text("Invalid project id in callback.")
+            return
+
+        chat_id = query.message.chat_id if query.message is not None else None
+        async with session_scope() as session:
+            user = await repo.get_or_create_user_by_telegram_id(
+                session, telegram_id=query.from_user.id
+            )
+            project = await repo.get_project(session, project_uuid)
+            # Auth check: the tapper must own the project. Prevents another user
+            # tapping a forwarded button (or a stale message).
+            if project is None or project.user_id != user.id:
+                if query.message is not None:
+                    await query.edit_message_text(
+                        "That project isn't available — it may have been removed."
+                    )
+                return
+            if chat_id is None:
+                return  # no chat context to bind to
+            await repo.set_active_project_for_chat(
+                session,
+                user=user,
+                chat_id=chat_id,
+                project_id=project.id,
+            )
+
+        if query.message is not None:
+            await query.edit_message_text(
+                f"Bound this chat to '{project.name}'. Say hi to start."
+            )
 
     # ------------------------------------------------------------------
     # Default text — dispatch to architect or specialist

@@ -17,6 +17,18 @@ based on the user's answers):
 
 $default_config_json
 
+# Existing projects in this domain (must produce a DIFFERENT name)
+
+$existing_project_names
+
+If the list above is non-empty, the new project_name MUST clearly differ
+from every existing one. Don't just append "2" — pick a name that names
+the actual difference. Examples:
+  - existing "Spanish" → new "Spanish — Travel"
+  - existing "Strength" → new "Strength — Cut phase"
+  - existing "Spanish B1" → new "Spanish B2 push"
+Still subject to the 25-character cap.
+
 When you have enough information to propose, end your response with EXACTLY
 this marker block, on its own lines, with valid JSON inside:
 

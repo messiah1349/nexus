@@ -73,10 +73,14 @@ class ArchitectInterview:
         domain: str,
         llm: LLMClient | None = None,
         default_config: DomainConfig | None = None,
+        existing_project_names: list[str] | None = None,
     ) -> None:
         self.domain = domain
         self.default_config = default_config or load_domain_default(domain)
-        self.system_prompt = build_architect_prompt(self.default_config)
+        self.system_prompt = build_architect_prompt(
+            self.default_config,
+            existing_project_names=existing_project_names,
+        )
         self.llm = llm or get_llm_client()
         self.history: list[ChatMessage] = []
         self.proposal: ArchitectProposal | None = None

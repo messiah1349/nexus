@@ -47,9 +47,11 @@ logger = logging.getLogger(__name__)
 
 SWEEP_INTERVAL_SECONDS = 60
 
-# InlineKeyboardButton callback_data prefix for "bind this chat to a project".
-# Format: ``use_project:<uuid>`` — 48 bytes, well under Telegram's 64-byte cap.
-CALLBACK_USE_PROJECT_PREFIX = "use_project:"
+# InlineKeyboardButton callback_data prefixes. Telegram caps callback_data at
+# 64 bytes; we stay comfortably under by using short prefixes plus a UUID or
+# short domain name.
+CALLBACK_USE_PROJECT_PREFIX = "use_project:"   # bind chat to <project uuid>
+CALLBACK_ARCHITECT_NEW_PREFIX = "architect_new:"  # start interview for <domain>
 
 # Telegram's hard cap on a single text message. Anything longer must be
 # split into multiple `send_message` calls.
@@ -127,10 +129,13 @@ class NexusBot:
         self.app.add_handler(CommandHandler("use", self.cmd_use))
         self.app.add_handler(CommandHandler("architect", self.cmd_architect))
         self.app.add_handler(CommandHandler("end", self.cmd_end))
+        # One CallbackQueryHandler routes both prefixes; we dispatch by
+        # prefix inside on_callback_query.
+        callback_pattern = (
+            f"^({CALLBACK_USE_PROJECT_PREFIX}|{CALLBACK_ARCHITECT_NEW_PREFIX})"
+        )
         self.app.add_handler(
-            CallbackQueryHandler(
-                self.on_callback_query, pattern=f"^{CALLBACK_USE_PROJECT_PREFIX}"
-            )
+            CallbackQueryHandler(self.on_callback_query, pattern=callback_pattern)
         )
         self.app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_text)
@@ -272,27 +277,81 @@ class NexusBot:
         ):
             return
         if not context.args:
-            await reply_chunked(update.message, 
+            await reply_chunked(
+                update.message,
                 "Usage: /architect <domain>. Available: "
-                f"{', '.join(list_available_domains())}"
+                f"{', '.join(list_available_domains())}",
             )
             return
         domain = context.args[0]
         if domain not in list_available_domains():
-            await reply_chunked(update.message, 
+            await reply_chunked(
+                update.message,
                 f"Unknown domain '{domain}'. Available: "
-                f"{', '.join(list_available_domains())}"
+                f"{', '.join(list_available_domains())}",
             )
             return
 
-        # Spin up the interview in memory; it lives until the proposal is
-        # persisted or the bot restarts.
-        state = self._state(update.effective_chat.id)
-        state.architect = ArchitectInterview(domain=domain)
-        state.architect_domain = domain
+        # If the user already has active projects in this domain, surface
+        # them before silently starting a new interview — most "create"
+        # intents are actually "resume". Tap an existing project to bind
+        # this chat to it, or tap "Create new project" to proceed with
+        # the architect (the LLM will pick a name that differs from the
+        # existing ones).
+        async with session_scope() as session:
+            user = await repo.get_or_create_user_by_telegram_id(
+                session, telegram_id=update.effective_user.id
+            )
+            same_domain = [
+                p
+                for p in await repo.list_projects(session, user.id)
+                if p.domain == domain
+            ]
+
+        if same_domain:
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        p.name,
+                        callback_data=f"{CALLBACK_USE_PROJECT_PREFIX}{p.id}",
+                    )
+                ]
+                for p in same_domain
+            ]
+            keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        "➕ Create new project",
+                        callback_data=f"{CALLBACK_ARCHITECT_NEW_PREFIX}{domain}",
+                    )
+                ]
+            )
+            await update.message.reply_text(
+                f"You already have {len(same_domain)} {domain} "
+                "project(s). Use one, or start fresh:",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return
+
+        # No collision — start the interview directly.
         await self._typing(update)
-        opener = await state.architect.kick_off()
+        opener = await self._start_architect_interview(
+            update.effective_chat.id, domain=domain, existing_names=[]
+        )
         await reply_chunked(update.message, opener)
+
+    async def _start_architect_interview(
+        self, chat_id: int, *, domain: str, existing_names: list[str]
+    ) -> str:
+        """Spin up an in-memory architect interview for the chat and return
+        the opener (so the caller can send it via whichever message surface
+        it has — a command's update.message or a callback's edit/send)."""
+        state = self._state(chat_id)
+        state.architect = ArchitectInterview(
+            domain=domain, existing_project_names=existing_names or None
+        )
+        state.architect_domain = domain
+        return await state.architect.kick_off()
 
     async def cmd_end(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -341,8 +400,15 @@ class NexusBot:
         # even if we then bail on a validation error.
         await query.answer()
 
-        if not query.data.startswith(CALLBACK_USE_PROJECT_PREFIX):
+        if query.data.startswith(CALLBACK_USE_PROJECT_PREFIX):
+            await self._handle_use_project_callback(query)
             return
+        if query.data.startswith(CALLBACK_ARCHITECT_NEW_PREFIX):
+            await self._handle_architect_new_callback(query)
+            return
+        # Any other prefix: already answered, nothing to do.
+
+    async def _handle_use_project_callback(self, query) -> None:
         raw_id = query.data[len(CALLBACK_USE_PROJECT_PREFIX):]
         try:
             project_uuid = uuid.UUID(raw_id)
@@ -378,6 +444,36 @@ class NexusBot:
             await query.edit_message_text(
                 f"Bound this chat to '{project.name}'. Say hi to start."
             )
+
+    async def _handle_architect_new_callback(self, query) -> None:
+        domain = query.data[len(CALLBACK_ARCHITECT_NEW_PREFIX):]
+        if domain not in list_available_domains():
+            if query.message is not None:
+                await query.edit_message_text(f"Unknown domain '{domain}'.")
+            return
+        chat_id = query.message.chat_id if query.message is not None else None
+        if chat_id is None:
+            return
+
+        # Pull the existing project names in this domain so the architect
+        # prompt can require a distinct new name.
+        async with session_scope() as session:
+            user = await repo.get_or_create_user_by_telegram_id(
+                session, telegram_id=query.from_user.id
+            )
+            existing_names = [
+                p.name
+                for p in await repo.list_projects(session, user.id)
+                if p.domain == domain
+            ]
+
+        opener = await self._start_architect_interview(
+            chat_id, domain=domain, existing_names=existing_names
+        )
+        # Replace the keyboard message with the architect's opener so the
+        # buttons disappear and the user just sees the next question.
+        if query.message is not None:
+            await query.edit_message_text(opener)
 
     # ------------------------------------------------------------------
     # Default text — dispatch to architect or specialist

@@ -17,12 +17,16 @@ from __future__ import annotations
 import uuid
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
 
-from nexus.clients.telegram import CALLBACK_USE_PROJECT_PREFIX, NexusBot
+from nexus.clients.telegram import (
+    CALLBACK_ARCHITECT_NEW_PREFIX,
+    CALLBACK_USE_PROJECT_PREFIX,
+    NexusBot,
+)
 from nexus.db import repository as repo
 from nexus.db.engine import session_scope
 
@@ -80,6 +84,21 @@ def _make_update_for_callback(
         edit_message_text=AsyncMock(return_value=None),
     )
     return SimpleNamespace(callback_query=query)
+
+
+def _make_update_for_architect_command(
+    *, telegram_id: int, chat_id: int
+) -> SimpleNamespace:
+    """Update shape that ``cmd_architect`` reads — needs effective_chat too,
+    plus message.reply_text returning an awaitable."""
+    message = SimpleNamespace(reply_text=AsyncMock(return_value=None))
+    return SimpleNamespace(
+        effective_user=SimpleNamespace(id=telegram_id),
+        effective_chat=SimpleNamespace(
+            id=chat_id, send_action=AsyncMock(return_value=None)
+        ),
+        message=message,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -217,3 +236,138 @@ async def test_callback_ignores_other_prefixes(bot: NexusBot) -> None:
     await bot.on_callback_query(update, context=SimpleNamespace())
     update.callback_query.answer.assert_awaited_once()
     update.callback_query.edit_message_text.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# /architect collision guard — same-domain duplicate check
+# ---------------------------------------------------------------------------
+
+
+def _patched_interview(opener: str = "What's your goal?"):
+    """Patch ArchitectInterview so kick_off doesn't need a real LLM."""
+    p = patch("nexus.clients.telegram.ArchitectInterview")
+    return p, opener
+
+
+async def test_architect_no_existing_starts_interview_directly(
+    bot: NexusBot, telegram_user_factory
+) -> None:
+    """With no projects in this domain, /architect kicks straight off."""
+    _, tg = await telegram_user_factory(401, "Fresh")
+    update = _make_update_for_architect_command(telegram_id=tg, chat_id=11)
+    update.message.reply_text.reset_mock()
+
+    patcher, opener = _patched_interview("First question?")
+    with patcher as MockAI:
+        instance = MockAI.return_value
+        instance.kick_off = AsyncMock(return_value=opener)
+        instance.proposal = None
+
+        ctx = SimpleNamespace(args=["language_learning"])
+        await bot.cmd_architect(update, ctx)
+
+    MockAI.assert_called_once_with(
+        domain="language_learning", existing_project_names=None
+    )
+    update.message.reply_text.assert_awaited_with(opener)
+
+
+async def test_architect_with_existing_same_domain_shows_keyboard(
+    bot: NexusBot, telegram_user_factory
+) -> None:
+    """With existing same-domain projects, /architect shows the keyboard
+    (existing projects + 'Create new') and does NOT start the interview."""
+    user_id, tg = await telegram_user_factory(402, "Dup")
+    async with session_scope() as session:
+        await repo.create_project(
+            session, user_id=user_id, name="Spanish", domain="language_learning"
+        )
+        await repo.create_project(
+            session, user_id=user_id, name="French", domain="language_learning"
+        )
+
+    update = _make_update_for_architect_command(telegram_id=tg, chat_id=22)
+    patcher, _ = _patched_interview()
+    with patcher as MockAI:
+        ctx = SimpleNamespace(args=["language_learning"])
+        await bot.cmd_architect(update, ctx)
+        MockAI.assert_not_called()  # interview should NOT start
+
+    update.message.reply_text.assert_awaited_once()
+    args, kwargs = update.message.reply_text.call_args
+    assert "already have 2" in args[0]
+    markup = kwargs["reply_markup"]
+    rows = markup.inline_keyboard
+    # 2 existing buttons + 1 "Create new" button
+    assert len(rows) == 3
+    existing_texts = {rows[0][0].text, rows[1][0].text}
+    assert existing_texts == {"Spanish", "French"}
+    for i in range(2):
+        assert rows[i][0].callback_data.startswith(CALLBACK_USE_PROJECT_PREFIX)
+    create_btn = rows[2][0]
+    assert "Create new" in create_btn.text
+    assert create_btn.callback_data == f"{CALLBACK_ARCHITECT_NEW_PREFIX}language_learning"
+
+
+async def test_architect_ignores_other_domain_projects(
+    bot: NexusBot, telegram_user_factory
+) -> None:
+    """A fitness project doesn't trigger the keyboard for /architect language_learning."""
+    user_id, tg = await telegram_user_factory(403, "MixedDomains")
+    async with session_scope() as session:
+        await repo.create_project(
+            session, user_id=user_id, name="Strength", domain="fitness"
+        )
+
+    update = _make_update_for_architect_command(telegram_id=tg, chat_id=33)
+    patcher, opener = _patched_interview("Welcome.")
+    with patcher as MockAI:
+        instance = MockAI.return_value
+        instance.kick_off = AsyncMock(return_value=opener)
+        ctx = SimpleNamespace(args=["language_learning"])
+        await bot.cmd_architect(update, ctx)
+        MockAI.assert_called_once_with(
+            domain="language_learning", existing_project_names=None
+        )
+
+
+async def test_architect_new_callback_passes_existing_names(
+    bot: NexusBot, telegram_user_factory
+) -> None:
+    """Tapping 'Create new project' passes the existing names into
+    ArchitectInterview so the prompt requires a distinct new name."""
+    user_id, tg = await telegram_user_factory(404, "WantsNew")
+    async with session_scope() as session:
+        await repo.create_project(
+            session, user_id=user_id, name="Spanish", domain="language_learning"
+        )
+
+    patcher, opener = _patched_interview("Tell me about your goal.")
+    with patcher as MockAI:
+        instance = MockAI.return_value
+        instance.kick_off = AsyncMock(return_value=opener)
+
+        update = _make_update_for_callback(
+            telegram_id=tg,
+            chat_id=44,
+            data=f"{CALLBACK_ARCHITECT_NEW_PREFIX}language_learning",
+        )
+        await bot.on_callback_query(update, context=SimpleNamespace())
+
+    MockAI.assert_called_once_with(
+        domain="language_learning", existing_project_names=["Spanish"]
+    )
+    update.callback_query.answer.assert_awaited_once()
+    update.callback_query.edit_message_text.assert_awaited_with(opener)
+
+
+async def test_architect_new_callback_unknown_domain(bot: NexusBot) -> None:
+    update = _make_update_for_callback(
+        telegram_id=405,
+        chat_id=55,
+        data=f"{CALLBACK_ARCHITECT_NEW_PREFIX}bogus_domain",
+    )
+    await bot.on_callback_query(update, context=SimpleNamespace())
+    update.callback_query.answer.assert_awaited_once()
+    msg = update.callback_query.edit_message_text.call_args.args[0]
+    assert "Unknown domain" in msg

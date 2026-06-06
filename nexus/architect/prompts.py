@@ -14,9 +14,20 @@ from nexus.config import render_prompt
 from nexus.domains.base import DomainConfig
 
 
-def build_architect_prompt(default_config: DomainConfig) -> str:
+def _render_existing_names(names: list[str] | None) -> str:
+    if not names:
+        return "(none)"
+    return "\n".join(f"  - {n}" for n in names)
+
+
+def build_architect_prompt(
+    default_config: DomainConfig,
+    *,
+    existing_project_names: list[str] | None = None,
+) -> str:
     return render_prompt(
         "architect_system",
         domain=default_config.domain,
         default_config_json=json.dumps(default_config.model_dump(), indent=2),
+        existing_project_names=_render_existing_names(existing_project_names),
     )

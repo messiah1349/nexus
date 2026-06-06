@@ -76,6 +76,23 @@ def _sample_proposal() -> ArchitectProposal:
     )
 
 
+def test_build_architect_prompt_includes_existing_names() -> None:
+    from nexus.architect.prompts import build_architect_prompt
+    from nexus.domains.registry import load_domain_default
+
+    cfg = load_domain_default("language_learning")
+
+    empty = build_architect_prompt(cfg)
+    assert "(none)" in empty
+
+    with_names = build_architect_prompt(
+        cfg, existing_project_names=["Spanish", "French"]
+    )
+    assert "  - Spanish" in with_names
+    assert "  - French" in with_names
+    assert "MUST clearly differ" in with_names
+
+
 def test_extract_proposal_happy_path() -> None:
     text = (
         "Sure, here is the plan:\n\n<<<PROPOSAL>>>\n"

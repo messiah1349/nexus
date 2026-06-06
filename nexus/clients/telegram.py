@@ -15,13 +15,15 @@ in-flight interviews; the user just re-runs /architect. Acceptable for MVP.
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from dataclasses import dataclass
 
 from sqlalchemy import desc as sa_desc
 from sqlalchemy import select
-from telegram import Update
-from telegram.constants import ChatAction
+from telegram import BotCommand, Update
+from telegram.constants import ChatAction, ParseMode
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -81,14 +83,61 @@ def chunk_for_telegram(
     return [c for c in chunks if c]
 
 
-async def reply_chunked(message, text: str) -> None:
-    """Send ``text`` as one or more Telegram messages, splitting if needed.
+def escape_markdown_v2(input_text: str) -> str:
+    """Convert LLM-style Markdown into Telegram MarkdownV2.
 
-    `message` is a ``telegram.Message`` (typed loosely so unit tests can pass
-    a stub).
+    Same shape as the impl in
+    https://github.com/messiah1349/telegram_agent_caller/blob/main/bot/common/utils.py:
+
+      - ``# Heading``, ``## Heading`` → ``*_Heading_*`` (bold-italic) + blank line
+      - Strip any remaining ``#``
+      - ``**bold**`` → ``*bold*`` (MarkdownV2 uses single ``*``)
+      - Literal ``\\n`` → real newline
+      - Escape MarkdownV2 special chars that are NOT used here for formatting:
+        ``[ ] ( ) ~ > ! . + - = | { } _``
+        (``*`` and `````` are preserved as formatting characters.)
+    """
+    header_pattern = r"[#]+\s+(.+?)\s*\n"
+    header_replacement = r"*_\1_*\n\n"
+    input_text = re.sub(header_pattern, header_replacement, input_text)
+    out = input_text.replace("#", "")
+    out = out.replace("**", "*")
+    out = out.replace("\\n", "\n")
+    for symb in "[]()~>!.+-=|{}_":
+        out = out.replace(symb, f"\\{symb}")
+    return out
+
+
+def _strip_markdown_formatting(text: str) -> str:
+    """Plain-text fallback when Telegram rejects our MarkdownV2.
+
+    Drops the formatting markers (``*``, ``_``, `````) so the user sees
+    readable prose even if it's stylistically dull.
+    """
+    return text.replace("*", "").replace("_", "").replace("`", "")
+
+
+async def reply_chunked(message, text: str) -> None:
+    """Send ``text`` as one or more Telegram messages, splitting if needed and
+    rendering each chunk as MarkdownV2.
+
+    Each chunk is escaped via :func:`escape_markdown_v2` and sent with
+    ``parse_mode=MarkdownV2``. If Telegram rejects the chunk with
+    ``Can't parse entities``, fall back to plain text on that chunk only —
+    other chunks proceed independently. The chunker runs first so that
+    splits land on natural boundaries; the per-chunk fallback keeps one
+    bad LLM response from breaking the rest of the reply.
     """
     for chunk in chunk_for_telegram(text):
-        await message.reply_text(chunk)
+        escaped = escape_markdown_v2(chunk)
+        try:
+            await message.reply_text(escaped, parse_mode=ParseMode.MARKDOWN_V2)
+        except BadRequest as exc:
+            if "Can't parse entities" in str(exc):
+                logger.warning("MarkdownV2 parse failed; sending as plain text")
+                await message.reply_text(_strip_markdown_formatting(escaped))
+            else:
+                raise
 
 
 @dataclass
@@ -99,6 +148,24 @@ class _ChatState:
     architect_domain: str | None = None
 
 
+BOT_COMMANDS: list[BotCommand] = [
+    BotCommand("start", "Register or greet"),
+    BotCommand("projects", "List your projects"),
+    BotCommand("use", "Bind this chat to a project — /use <name>"),
+    BotCommand("architect", "Start an architect interview — /architect <domain>"),
+    BotCommand("end", "End the current session and summarize it"),
+]
+
+
+async def _post_init(application: Application) -> None:
+    """Push the canonical command list to Telegram on startup.
+
+    Replaces whatever was last set (via BotFather or a previous run) so the
+    ``/`` autocomplete in clients matches the bot's actual handlers.
+    """
+    await application.bot.set_my_commands(BOT_COMMANDS)
+
+
 class NexusBot:
     def __init__(self, token: str | None = None) -> None:
         settings = get_settings()
@@ -107,7 +174,12 @@ class NexusBot:
             raise ValueError(
                 "TELEGRAM_BOT_TOKEN is not set — add it to .env or pass token="
             )
-        self.app: Application = Application.builder().token(resolved_token).build()
+        self.app: Application = (
+            Application.builder()
+            .token(resolved_token)
+            .post_init(_post_init)
+            .build()
+        )
         self._chat_state: dict[int, _ChatState] = {}
         self._register_handlers()
 

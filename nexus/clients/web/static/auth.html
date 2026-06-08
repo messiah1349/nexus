@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nexus — Sign in</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="auth-page">
+  <main class="auth-card">
+    <h1>Nexus</h1>
+    <p class="muted">Sign in to access your projects.</p>
+
+    <div id="telegram-widget-host" aria-live="polite"></div>
+
+    <details id="dev-login-wrap" hidden>
+      <summary>Local dev login</summary>
+      <p class="muted small">
+        Dev mode is enabled. Enter the telegram_id of the user you want to
+        sign in as. This bypasses Telegram verification — do not enable in
+        production.
+      </p>
+      <form id="dev-login-form">
+        <input
+          id="dev-tg-id"
+          name="telegram_id"
+          type="number"
+          inputmode="numeric"
+          placeholder="telegram_id"
+          required
+        >
+        <input id="dev-name" name="display_name" type="text" placeholder="display name (optional)">
+        <button type="submit">Dev login</button>
+      </form>
+      <p id="dev-login-error" class="error" hidden></p>
+    </details>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>

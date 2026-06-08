@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nexus — Chat</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="chat-page">
+  <aside class="sidebar">
+    <header class="sidebar-header">
+      <h2>Projects</h2>
+      <button id="logout" class="link" title="Sign out">↩ logout</button>
+    </header>
+    <ul id="project-list" class="project-list" aria-live="polite"></ul>
+    <p id="no-projects" class="muted small" hidden>
+      No projects yet. Use the Telegram bot to run <code>/architect</code>.
+    </p>
+  </aside>
+
+  <main class="chat">
+    <header class="chat-header">
+      <span id="chat-title">Select a project</span>
+      <button id="end-session" class="link" hidden title="End and summarize the current session">⏹ end session</button>
+    </header>
+    <div id="messages" class="messages" aria-live="polite"></div>
+    <form id="chat-form" class="chat-form">
+      <textarea id="chat-input" rows="2" placeholder="Type a message — Enter to send, Shift+Enter for newline" disabled></textarea>
+      <button id="send-button" type="submit" disabled>Send</button>
+    </form>
+    <p id="chat-status" class="muted small" hidden></p>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -239,6 +239,32 @@ def chat(
     _run(_do())
 
 
+@app.command("web")
+def web_run(
+    host: str = typer.Option("127.0.0.1", "--host"),
+    port: int = typer.Option(8000, "--port"),
+    reload: bool = typer.Option(
+        False, "--reload", help="Hot-reload on source changes (dev)"
+    ),
+    log_level: str = typer.Option("info", "--log-level"),
+) -> None:
+    """Start the web frontend (FastAPI + uvicorn).
+
+    Defaults to 127.0.0.1 to avoid exposing dev mode to the network. Override
+    with --host=0.0.0.0 for LAN access. Requires WEB_SESSION_SECRET in env;
+    set WEB_DEV_AUTH=true to enable the /auth/dev bypass for local testing.
+    """
+    import uvicorn
+
+    uvicorn.run(
+        "nexus.clients.web.app:app",
+        host=host,
+        port=port,
+        reload=reload,
+        log_level=log_level,
+    )
+
+
 @app.command("bot")
 def bot_run(
     log_level: str = typer.Option(

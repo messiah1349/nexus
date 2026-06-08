@@ -48,10 +48,21 @@ class Settings(BaseSettings):
     anthropic_api_key: str | None = Field(default=None, alias="ANTHROPIC_API_KEY")
     gemini_api_key: str | None = Field(default=None, alias="GEMINI_API_KEY")
     telegram_bot_token: str | None = Field(default=None, alias="TELEGRAM_BOT_TOKEN")
+    telegram_bot_username: str | None = Field(
+        default=None, alias="TELEGRAM_BOT_USERNAME"
+    )
 
     llm_provider: str = Field(default="anthropic", alias="LLM_PROVIDER")
     # When None, each provider falls back to its own DEFAULT_MODEL.
     llm_model: str | None = Field(default=None, alias="LLM_MODEL")
+
+    # Web client.
+    web_session_secret: str = Field(
+        default="dev-only-insecure-change-me", alias="WEB_SESSION_SECRET"
+    )
+    # When True, /auth/dev accepts a telegram_id and creates a session without
+    # going through the Telegram Login Widget. For local testing only.
+    web_dev_auth: bool = Field(default=False, alias="WEB_DEV_AUTH")
 
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     env: str = Field(default="dev", alias="ENV")

@@ -22,6 +22,8 @@ from unittest.mock import AsyncMock, patch
 import pytest
 import pytest_asyncio
 
+from telegram.constants import ParseMode
+
 from nexus.clients.telegram import (
     CALLBACK_ARCHITECT_NEW_PREFIX,
     CALLBACK_USE_PROJECT_PREFIX,
@@ -269,7 +271,8 @@ async def test_architect_no_existing_starts_interview_directly(
     MockAI.assert_called_once_with(
         domain="language_learning", existing_projects=None
     )
-    update.message.reply_text.assert_awaited_with(opener)
+    # reply_chunked now sends with parse_mode=HTML (markdown rendering).
+    update.message.reply_text.assert_awaited_with(opener, parse_mode=ParseMode.HTML)
 
 
 async def test_architect_with_existing_same_domain_shows_keyboard(

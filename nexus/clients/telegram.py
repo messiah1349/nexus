@@ -17,6 +17,9 @@ import logging
 import uuid
 from dataclasses import dataclass
 
+import html as html_mod
+import re
+
 from sqlalchemy import desc as sa_desc
 from sqlalchemy import select
 from telegram import (
@@ -24,7 +27,8 @@ from telegram import (
     InlineKeyboardMarkup,
     Update,
 )
-from telegram.constants import ChatAction
+from telegram.constants import ChatAction, ParseMode
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -94,14 +98,133 @@ def chunk_for_telegram(
     return [c for c in chunks if c]
 
 
+def markdown_to_telegram_html(text: str) -> str:
+    """Convert LLM-style markdown to the subset of HTML Telegram accepts.
+
+    Handles: ``**bold**``, ``*italic*`` / ``_italic_``, ``~~strike~~``,
+    ``` `inline code` ```, fenced code blocks with optional language,
+    ``[link text](url)``, headings (``# ...`` → ``<b>...</b>``), and
+    line-prefixed blockquotes (``> ...``).
+
+    Everything outside formatting markers is HTML-escaped, so a stray
+    ``<`` or ``&`` from the LLM doesn't tear the message apart.
+
+    The conversion is regex-based, not a real markdown parser — sufficient
+    for the LLM's typical output. ``reply_chunked`` falls back to plain
+    text on Telegram parse failures, so misshapen edge cases still
+    deliver readable content.
+    """
+    placeholders: dict[str, str] = {}
+    counter = 0
+
+    def stash(replacement: str, kind: str) -> str:
+        nonlocal counter
+        # \x00 survives html.escape() and won't show up in normal text;
+        # ASCII letters/digits inside the marker can't match markdown patterns.
+        key = f"\x00NEXMD{kind}{counter}\x00"
+        placeholders[key] = replacement
+        counter += 1
+        return key
+
+    # 1) Fenced code blocks. Body is HTML-escaped inside the wrapper.
+    def repl_fenced(m: re.Match) -> str:
+        lang = m.group(1)
+        body = html_mod.escape(m.group(2).rstrip("\n"))
+        if lang:
+            return stash(
+                f'<pre><code class="language-{html_mod.escape(lang)}">{body}</code></pre>',
+                "F",
+            )
+        return stash(f"<pre>{body}</pre>", "F")
+
+    text = re.sub(r"```([\w+-]*)\n?(.*?)```", repl_fenced, text, flags=re.DOTALL)
+
+    # 2) Inline code.
+    def repl_inline(m: re.Match) -> str:
+        return stash(f"<code>{html_mod.escape(m.group(1))}</code>", "I")
+
+    text = re.sub(r"`([^`\n]+)`", repl_inline, text)
+
+    # 3) Links: [text](url)
+    def repl_link(m: re.Match) -> str:
+        link_text = html_mod.escape(m.group(1))
+        url = html_mod.escape(m.group(2), quote=True)
+        return stash(f'<a href="{url}">{link_text}</a>', "L")
+
+    text = re.sub(r"\[([^\]\n]+)\]\(([^)\n]+)\)", repl_link, text)
+
+    # 4) HTML-escape the remaining text. Placeholders contain only \x00 and
+    #    ASCII letters/digits which html.escape leaves alone.
+    text = html_mod.escape(text)
+
+    # 5) Now apply markdown markers to the already-escaped text. The text
+    #    contains literal *, _, ~, # (none of those are HTML-special), so
+    #    regex matching works as expected.
+
+    # Headings: # X / ## X / ... → <b>X</b>. Multi-line aware.
+    text = re.sub(r"(?m)^#{1,6}[ \t]+(.+?)\s*$", r"<b>\1</b>", text)
+
+    # Bold (run before italic so *X* doesn't steal **X** halves).
+    text = re.sub(r"\*\*([^*\n]+)\*\*", r"<b>\1</b>", text)
+
+    # Italic. The negative look-arounds prevent munching adjacent markdown.
+    text = re.sub(r"(?<![*\w])\*([^*\n]+?)\*(?![*\w])", r"<i>\1</i>", text)
+    text = re.sub(r"(?<![_\w])_([^_\n]+?)_(?![_\w])", r"<i>\1</i>", text)
+
+    # Strikethrough (GFM-style ~~X~~).
+    text = re.sub(r"~~([^~\n]+)~~", r"<s>\1</s>", text)
+
+    # 6) Blockquotes. > was html-escaped to &gt;, so match on that.
+    lines = text.split("\n")
+    out: list[str] = []
+    in_quote = False
+    for line in lines:
+        m = re.match(r"^&gt;\s?(.*)$", line)
+        if m:
+            if not in_quote:
+                out.append("<blockquote>")
+                in_quote = True
+            out.append(m.group(1))
+        else:
+            if in_quote:
+                out.append("</blockquote>")
+                in_quote = False
+            out.append(line)
+    if in_quote:
+        out.append("</blockquote>")
+    text = "\n".join(out)
+
+    # 7) Restore placeholders. Do this last so their literal <tags> survive
+    #    the html.escape step earlier.
+    for key, repl in placeholders.items():
+        text = text.replace(key, repl)
+
+    return text
+
+
 async def reply_chunked(message, text: str) -> None:
     """Send ``text`` as one or more Telegram messages, splitting if needed.
+
+    Each chunk is converted from markdown to Telegram's HTML subset and
+    sent with ``parse_mode=HTML``. If Telegram rejects a chunk with a
+    "can't parse" error (unbalanced markup, etc.), we re-send the
+    *original* chunk as plain text — never the half-converted HTML.
 
     ``message`` is a ``telegram.Message`` (typed loosely so unit tests can
     pass a stub).
     """
     for chunk in chunk_for_telegram(text):
-        await message.reply_text(chunk)
+        rendered = markdown_to_telegram_html(chunk)
+        try:
+            await message.reply_text(rendered, parse_mode=ParseMode.HTML)
+        except BadRequest as exc:
+            if "can't parse" in str(exc).lower():
+                logger.warning(
+                    "Telegram HTML parse failed; falling back to plain text"
+                )
+                await message.reply_text(chunk)
+            else:
+                raise
 
 
 @dataclass

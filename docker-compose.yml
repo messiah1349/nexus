@@ -16,5 +16,19 @@ services:
       timeout: 3s
       retries: 10
 
+  bot:
+    build: .
+    container_name: nexus-bot
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    # Inside the compose network Postgres is reachable as host "postgres",
+    # not localhost — override whatever .env says so the container connects.
+    environment:
+      POSTGRES_URL: postgresql+asyncpg://nexus:nexus@postgres:5432/nexus
+
 volumes:
   nexus-pgdata:

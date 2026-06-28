@@ -1,0 +1,27 @@
+# Keep the build context tiny — only ship what the image needs.
+.git
+.venv
+.pytest_cache
+.ruff_cache
+.mypy_cache
+__pycache__
+*.py[cod]
+*.egg-info
+
+# Secrets / local state never belong in the image.
+.env
+.env.*
+*.log
+logs/
+data/
+*.sqlite
+*.db
+
+# Not needed at runtime.
+tests
+docs
+errors
+.claude
+.vscode
+.idea
+deploy
